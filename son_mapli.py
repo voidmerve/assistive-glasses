@@ -65,6 +65,7 @@ from queue import Queue
 from picamera2 import Picamera2
 from transformers import pipeline
 from dotenv import load_dotenv
+import guvenlik
 
 # ───────────────── CONFIG ─────────────────
 # API key'ler bu dosyayla aynı klasördeki .env dosyasından okunur.
@@ -108,6 +109,16 @@ mode_lock = threading.Lock()
 # ───────────────── TTS QUEUE ─────────────────
 tts_queue = Queue(maxsize=1)
 tts_busy = threading.Event()
+
+# ───────────────── GÜVENLİK KATMANI ─────────────────
+# Mesafe sensörü + engel uyarıları + internet izleyici. İnternetten ve yapay
+# zekâdan bağımsız kendi thread'lerinde çalışır. Derinlik modeli yüklenmeden
+# önce başlatılır ki yükleme sırasında da uyarılar çalışsın.
+# Sensör seçimi .env içindeki SENSOR_MODU ile yapılır (simulasyon / gercek).
+# Tüm sesler (TTS dahil) bu ses yöneticisinden geçer: engel uyarıları acil
+# önceliklidir ve o an çalan normal konuşmayı keser.
+ses_yoneticisi = guvenlik.SesYoneticisi()
+guvenlik_sistemi = guvenlik.GuvenlikSistemi(ses=ses_yoneticisi).baslat()
 
 # ───────────────── DEPTH MODEL ─────────────────
 print("DEPTH MODELİ YÜKLENİYOR...")
@@ -269,6 +280,7 @@ def handle_key(key):
                 print("\n🚶 SOKAK MODU — sürekli analiz")
     elif key == 'q':
         print("\nÇıkılıyor...")
+        guvenlik_sistemi.durdur()
         restore_terminal()
         os._exit(0)
     elif key == ' ':
@@ -509,7 +521,9 @@ async def speak(text):
         communicate = edge_tts.Communicate(text, "tr-TR-EmelNeural")
         f = "/tmp/tts.mp3"
         await communicate.save(f)
-        subprocess.run(["paplay", f], check=False)
+        # Normal öncelik: engel uyarısı gelirse bu konuşma kesilir
+        if not ses_yoneticisi.normal_cal(f):
+            print("🔇 Konuşma acil uyarı nedeniyle kesildi veya çalınamadı")
     except Exception as e:
         print("TTS ERROR:", e)
 

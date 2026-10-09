@@ -3,3 +3,6 @@
 !.gitignore
 .env
 !.env.example
+!guvenlik.py
+!sesler/
+!sesler/*.wav
