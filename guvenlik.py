@@ -22,6 +22,7 @@ Ayarlar (.env):
   SENSOR_HZ=15                 # saniyedeki okuma sayısı
   INTERNET_KONTROL_S=5         # internet kontrol aralığı
   SIM_HATA_ORANI=0.005         # simülasyonda yapay okuma hatası olasılığı (0 = kapalı)
+  SES_UYANIK_TUT=1             # Bluetooth çıkışını uyutmamak için arka planda sessizlik çal (0 = kapalı)
 
 Tek başına test:
   python3 guvenlik.py                 # simülasyon + ses
@@ -70,6 +71,9 @@ ACIL_YAKLASMA_M = _env_float("ACIL_YAKLASMA_M", 0.15)
 SENSOR_HZ = _env_float("SENSOR_HZ", 15.0)
 INTERNET_KONTROL_S = _env_float("INTERNET_KONTROL_S", 5.0)
 SIM_HATA_ORANI = _env_float("SIM_HATA_ORANI", 0.005)
+# Bluetooth çıkışı 5 sn boşta kalınca uyuyor, uyanırken sesin başı kayboluyor.
+# 1 iken arka planda sürekli sessizlik çalınır, çıkış hep uyanık kalır.
+SES_UYANIK_TUT = (os.getenv("SES_UYANIK_TUT") or "1").strip() not in ("0", "hayir", "hayır", "false")
 
 # Ses dosyaları
 SES_DOSYALARI = {
@@ -394,6 +398,88 @@ class UyariMantigi:
 
 
 # ═════════════════════════ SES SİSTEMİ ═════════════════════════
+class CikisUyanikTutucu(threading.Thread):
+    """
+    Varsayılan ses çıkışına sürekli sessizlik gönderir. PipeWire, çalan bir
+    akış olduğu sürece çıkışı uyutmaz, böylece Bluetooth bağlantısı açık kalır
+    ve uyarılar baştan kesilmeden, gecikmesiz çalar. Bedeli: kulaklık pili
+    biraz daha hızlı biter.
+
+    Varsayılan çıkış değişirse (başka kulaklık bağlandıysa) akışı yeniden açar.
+    pacat ölürse 2 sn sonra yeniden başlatır.
+    """
+
+    ORNEKLEME = 8000
+    PARCA = b"\x00\x00" * 800  # 100 ms sessizlik
+
+    def __init__(self):
+        super().__init__(daemon=True, name="ses-uyanik")
+        self.durdur_olayi = threading.Event()
+        self._proc = None
+        self._kilit = threading.Lock()
+
+    @staticmethod
+    def _varsayilan_cikis():
+        try:
+            return subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                                  text=True, timeout=3).stdout.strip()
+        except Exception:
+            return ""
+
+    def _baslat(self):
+        return subprocess.Popen(
+            ["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
+             f"--rate={self.ORNEKLEME}", "--client-name=guvenlik-uyanik",
+             "--stream-name=sessizlik"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _kapat(self):
+        with self._kilit:
+            p, self._proc = self._proc, None
+        if p is not None:
+            try:
+                p.kill()
+                p.wait(timeout=1)
+            except Exception:
+                pass
+            try:
+                p.stdin.close()
+            except Exception:
+                pass  # süreç öldüğü için boru kırık olabilir, önemsiz
+
+    def run(self):
+        cikis = None
+        son_kontrol = 0.0
+        while not self.durdur_olayi.is_set():
+            try:
+                simdi = time.monotonic()
+                if simdi - son_kontrol >= 5.0:
+                    son_kontrol = simdi
+                    yeni = self._varsayilan_cikis()
+                    if yeni and yeni != cikis:
+                        if cikis is not None:
+                            _log(f"🎧 Ses çıkışı değişti: {yeni}")
+                        cikis = yeni
+                        self._kapat()
+                with self._kilit:
+                    if self.durdur_olayi.is_set():
+                        break
+                    if self._proc is None or self._proc.poll() is not None:
+                        self._proc = self._baslat()
+                    p = self._proc
+                # pacat tamponu dolunca yazma bloklanır, döngü gerçek zamanlı ilerler
+                p.stdin.write(self.PARCA)
+                p.stdin.flush()
+            except Exception:
+                self._kapat()
+                self.durdur_olayi.wait(2.0)
+        self._kapat()
+
+    def durdur(self):
+        self.durdur_olayi.set()
+        self._kapat()
+
+
 ONCELIK_NORMAL = "normal"
 ONCELIK_ACIL = "acil"
 
@@ -419,6 +505,10 @@ class SesYoneticisi:
         self._proc_oncelik = None
         self._proc_dosya = None
         threading.Thread(target=self._acil_dongusu, daemon=True, name="ses-acil").start()
+        self._uyanik = None
+        if SES_UYANIK_TUT and not sessiz:
+            self._uyanik = CikisUyanikTutucu()
+            self._uyanik.start()
 
     def _baslat(self, dosya, oncelik):
         """Kilit içinde çağrılır."""
@@ -501,6 +591,8 @@ class SesYoneticisi:
         return self._acil_mesgul
 
     def durdur(self):
+        if self._uyanik is not None:
+            self._uyanik.durdur()
         with self._kosul:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.terminate()
