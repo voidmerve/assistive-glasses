@@ -5,6 +5,7 @@ Asistif Gözlük - Ev Modu + Sokak Modu
 KURULUM (ilk seferde):
     sudo apt install libportaudio2
     pip install sounddevice
+    pip install python-dotenv
 
 ÇALIŞTIRMADAN ÖNCE:
     1. Bluetooth kulaklığın bağlı olduğundan emin ol.
@@ -28,10 +29,13 @@ SOKAK MODU:
     Gemini hedefi çıkarır, Google Maps'ten rota alınır, TTS ile söylenir.
 
 API KEY'LERİ:
-    Dosyanın üstündeki CONFIG bölümünde:
-        API_KEY = "..."              # Gemini key
-        GOOGLE_MAPS_API_KEY = "..."  # Maps key
-    Yeni key alınca sadece bu iki satırı değiştir, başka yerde değişiklik gerekmez.
+    Anahtarlar kodda değil, bu dosyayla aynı klasördeki .env dosyasında durur:
+        GEMINI_API_KEY=...        # Gemini key
+        GOOGLE_MAPS_API_KEY=...   # Maps key
+    İlk kurulumda .env.example dosyasını .env adıyla kopyalayıp değerleri doldur.
+    Yeni key alınca sadece .env dosyasını değiştir, koda dokunmaya gerek yok.
+    .env dosyası .gitignore'dadır, git'e gönderilmez.
+    Anahtarlardan biri eksikse program hata mesajı verip durur.
 """
 
 import warnings
@@ -60,17 +64,29 @@ from PIL import Image
 from queue import Queue
 from picamera2 import Picamera2
 from transformers import pipeline
+from dotenv import load_dotenv
 
 # ───────────────── CONFIG ─────────────────
-# API key'i ortam değişkeninden al, yoksa buradan oku
-# API key — env var KULLANMAYI BIRAKTIK. Yeni key alınca sadece bu satır değişir.
-API_KEY = "BURAYA_GEMINI_KEY"
-GOOGLE_MAPS_API_KEY = "BURAYA_MAPS_KEY"
+# API key'ler bu dosyayla aynı klasördeki .env dosyasından okunur.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+API_KEY = os.getenv("GEMINI_API_KEY")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+
+_missing_keys = [name for name, value in (
+    ("GEMINI_API_KEY", API_KEY),
+    ("GOOGLE_MAPS_API_KEY", GOOGLE_MAPS_API_KEY),
+) if not value]
+if _missing_keys:
+    print(f"❌ HATA: .env dosyasında şu API anahtarları eksik veya boş: {', '.join(_missing_keys)}")
+    print("   .env.example dosyasını .env adıyla kopyalayıp anahtarları doldurun.")
+    sys.exit(1)
 
 # Not: 2.5-flash-lite multimodal'dır. Eğer ses inputuyla hata verirse
 # "gemini-2.5-flash" olarak değiştir.
 MODEL_NAME = "gemini-2.5-flash-lite"
-MODEL_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+MODEL_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
+# Key URL'de değil header'da gider — hata mesajlarında URL basılırsa key görünmesin
+GEMINI_HEADERS = {"x-goog-api-key": API_KEY}
 
 HTTP_TIMEOUT = 25
 RATE_LIMIT_DELAY = 2
@@ -80,7 +96,7 @@ DEPTH_CALIBRATION = 1.0
 
 
 # Şimdilik sabit test konumu — telefon GPS entegre edilince değişecek
-# Format: (lat, lng) — örnek: Taksim Meydanı, İstanbul
+# Format: (lat, lng) — Denizli'de sabit test konumu
 CURRENT_LOCATION = (37.73831482466314, 29.10723965422727)
 
 # ───────────────── MOD STATE ─────────────────
@@ -169,6 +185,7 @@ class VoiceRecorder:
                 print(f"❌ Kayıt başlatılamadı: {e}")
                 self.recording = False
                 self.stream = None
+
 
     def stop(self, path="/tmp/prompt.wav"):
         with self.lock:
@@ -384,7 +401,7 @@ def _gemini_post(payload, label="", max_retries=2):
     for attempt in range(max_retries + 1):
         try:
             t0 = time.time()
-            r = requests.post(MODEL_URL, json=payload, timeout=HTTP_TIMEOUT)
+            r = requests.post(MODEL_URL, json=payload, headers=GEMINI_HEADERS, timeout=HTTP_TIMEOUT)
             elapsed = time.time() - t0
             print(f"  ⚡ AI ({label}): {elapsed:.1f}s - {r.status_code}")
 
@@ -477,7 +494,8 @@ def combine_results(ai_text, depth_info):
                 if rest:
                     rest = rest[0].lower() + rest[1:]
                 rest = rest.rstrip(".")
-                new_parts.append(f"{dist:.1f} {rest}")
+                dist_str = f"{dist:.1f}".replace(".", ",")  # TTS için Türkçe ondalık
+                new_parts.append(f"{dist_str} metre {rest}")
                 added = True
                 break
         if not added:

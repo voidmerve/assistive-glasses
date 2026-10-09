@@ -1,3 +1,5 @@
 *
 !son_mapli.py
 !.gitignore
+.env
+!.env.example
