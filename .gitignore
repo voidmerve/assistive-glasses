@@ -7,3 +7,4 @@
 !sesler/
 !sesler/*.wav
 !sesli_komut.py
+!test_carpisma.py

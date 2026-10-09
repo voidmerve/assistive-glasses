@@ -1,36 +1,47 @@
 """
-Asistif Gözlük - Güvenlik Katmanı (Aşama 1)
-===========================================
+Asistif Gözlük - Güvenlik Katmanı
+=================================
 
 İnternetten ve yapay zekâdan tamamen bağımsız çalışan engel uyarı sistemi.
+
+Tasarım ilkesi: varsayılan durum sessizlik. Gözlük bastonun göremediği baş ve
+göğüs hizasındaki engeller için var. Mesafeye değil, çarpışmaya kalan süreye
+bakar: duvarın yanında durmak uyarı vermez, duvara doğru yürümek verir.
 
 Parçalar:
   - MesafeSensoru arayüzü: GercekSensor (VL53L0X) ve SimulasyonSensoru
   - SensorThread: sensörü ayrı bir thread'de ~15 Hz okur, hata olsa da çökmez
-  - UyariMantigi: iki eşik (uyarı / acil), histerezis, bekleme süresi
-  - SesYoneticisi: acil ve normal öncelikli ses çıkışı (acil, normali keser)
-  - InternetIzleyici: 5 saniyede bir bağlantı kontrolü, değişince sesli bildirir
+  - CarpismaMantigi: yaklaşma hızı ve çarpışmaya kalan süre (TTC) hesabı
+  - SesYoneticisi: acil ve normal öncelikli ses çıkışı + tık kanalı
+  - Titresim: sapta titreşim motoru (TITRESIM_PIN verilirse)
+  - InternetIzleyici: 5 saniyede bir bağlantı kontrolü, değişince kısa ton çalar
   - GuvenlikSistemi: hepsini birleştiren tek giriş noktası
+
+Uyarılar:
+  Çarpışmaya < TTC_UYARI_S kaldı → tık + hafif titreşim, yaklaştıkça hızlanır (park sensörü gibi)
+  Çarpışmaya < TTC_ACIL_S kaldı  → bip + "Dur" + güçlü titreşim
+  Duruyorsan ya da engel seninle aynı hızda gidiyorsa (kalabalık) → sessiz
 
 Ayarlar (.env):
   SENSOR_MODU=simulasyon       # veya: gercek
-  UYARI_ESIGI_M=1.2            # bu mesafenin altında "Dikkat"
-  ACIL_ESIGI_M=0.7             # bu mesafenin altında "Dur"
-  HISTEREZIS_M=0.15            # uyarıdan çıkmak için eşiğin bu kadar üstüne çıkmalı
-  UYARI_BEKLEME_S=4            # aynı uyarı en erken bu kadar saniye sonra tekrar çalar
-  ACIL_YAKLASMA_M=0.15         # acil durumda bu kadar daha yaklaşılırsa bekleme süresi beklenmez
+  TTC_UYARI_S=2.0              # çarpışmaya bu kadar saniye kala tıklamaya başla
+  TTC_ACIL_S=1.0               # çarpışmaya bu kadar saniye kala "Dur"
+  MIN_YAKLASMA_HIZI=0.25       # m/s. Bundan yavaş yaklaşma "duruyor" sayılır
+  ACIL_TEKRAR_S=2.5            # iki "Dur" arasında en az bu kadar saniye
+  SENSOR_GURULTU_M=0.025       # sensörün okuma gürültüsü (m). Yanlış uyarı çoksa artır
+  TITRESIM_PIN=                # titreşim motorunun GPIO (BCM) numarası, boşsa kapalı
   SENSOR_HZ=15                 # saniyedeki okuma sayısı
   INTERNET_KONTROL_S=5         # internet kontrol aralığı
   SIM_HATA_ORANI=0.005         # simülasyonda yapay okuma hatası olasılığı (0 = kapalı)
   SENSOR_ARIZA_S=2             # bu kadar saniye art arda hata → "Mesafe sensörü çalışmıyor"
-  SES_UYANIK_TUT=1             # Bluetooth çıkışını uyutmamak için arka planda sessizlik çal (0 = kapalı)
 
 Tek başına test:
-  python3 guvenlik.py                 # simülasyon + ses
-  python3 guvenlik.py --sessiz        # simülasyon, ses çalmadan sadece ekrana yazar
-  python3 guvenlik.py --sure 60       # 60 saniye sonra kendiliğinden çıkar
-  python3 guvenlik.py --ariza 5       # 3. saniyede başlayıp 5 sn süren sensör arızası simüle eder
-  python3 guvenlik.py --sesleri-uret  # sesler/ klasöründeki WAV dosyalarını yeniden üretir (internet gerekir)
+  python3 guvenlik.py                          # karışık simülasyon senaryosu + ses
+  python3 guvenlik.py --senaryo duvar_yaninda  # yaklasma, duvar_yaninda, kalabalik, bas_cevirme, karisik
+  python3 guvenlik.py --sessiz                 # ses çalmadan sadece ekrana yazar
+  python3 guvenlik.py --sure 60                # 60 saniye sonra kendiliğinden çıkar
+  python3 guvenlik.py --ariza 5                # 3. saniyede başlayıp 5 sn süren sensör arızası
+  python3 guvenlik.py --sesleri-uret           # konuşma dosyalarını üretir (internet gerekir)
 """
 
 import os
@@ -65,19 +76,16 @@ def _env_float(ad, varsayilan):
 
 
 SENSOR_MODU = (os.getenv("SENSOR_MODU") or "simulasyon").strip().lower()
-UYARI_ESIGI_M = _env_float("UYARI_ESIGI_M", 1.2)
-ACIL_ESIGI_M = _env_float("ACIL_ESIGI_M", 0.7)
-HISTEREZIS_M = _env_float("HISTEREZIS_M", 0.15)
-UYARI_BEKLEME_S = _env_float("UYARI_BEKLEME_S", 4.0)
-ACIL_YAKLASMA_M = _env_float("ACIL_YAKLASMA_M", 0.15)
+TTC_UYARI_S = _env_float("TTC_UYARI_S", 2.0)
+TTC_ACIL_S = _env_float("TTC_ACIL_S", 1.0)
+MIN_YAKLASMA_HIZI = _env_float("MIN_YAKLASMA_HIZI", 0.25)
+ACIL_TEKRAR_S = _env_float("ACIL_TEKRAR_S", 2.5)
+TITRESIM_PIN = (os.getenv("TITRESIM_PIN") or "").strip()
+SENSOR_GURULTU_M = _env_float("SENSOR_GURULTU_M", 0.025)
 SENSOR_HZ = _env_float("SENSOR_HZ", 15.0)
 INTERNET_KONTROL_S = _env_float("INTERNET_KONTROL_S", 5.0)
 SIM_HATA_ORANI = _env_float("SIM_HATA_ORANI", 0.005)
 SENSOR_ARIZA_S = _env_float("SENSOR_ARIZA_S", 2.0)
-# Bluetooth çıkışı 5 sn boşta kalınca uyuyor, uyanırken sesin başı kayboluyor.
-# 1 iken arka planda sürekli sessizlik çalınır, çıkış hep uyanık kalır.
-SES_UYANIK_TUT = (os.getenv("SES_UYANIK_TUT") or "1").strip() not in ("0", "hayir", "hayır", "false")
-
 # Ses dosyaları
 SES_DOSYALARI = {
     "dikkat": "Dikkat",
@@ -86,9 +94,21 @@ SES_DOSYALARI = {
     "internet_geldi": "İnternet bağlantısı geri geldi",
     "sensor_calismiyor": "Mesafe sensörü çalışmıyor",
     "sensor_calisiyor": "Mesafe sensörü tekrar çalışıyor",
-    "ev_modu": "Ev modu",
-    "sokak_modu": "Sokak modu",
+    # Durum sorgusu ("durum ne") için parçalar
+    "durum_internet_var": "İnternet var",
+    "durum_internet_yok": "İnternet yok",
+    "durum_sensor_iyi": "Mesafe sensörü çalışıyor",
+    "durum_sensor_yok": "Mesafe sensörü çalışmıyor",
+    # Konuşma düzeyi onayları
+    "duzey_kisa": "Kısa konuşma",
+    "duzey_detayli": "Detaylı konuşma",
+    "duzey_sessiz": "Sessiz mod. Sadece sorunca konuşacağım",
+    "tekrar_yok": "Tekrarlanacak bir şey yok",
+    "anlamadim": "Anlayamadım, tekrar sorar mısın",
+    "internet_gerekli": "Bunun için internet gerekiyor",
 }
+# İnternetsiz üretilen kısa tonlar (sözsüz durum bildirimleri)
+TONLAR = ["ton_internet_yok", "ton_internet_var", "ton_onay", "ton_hazir"]
 TTS_SESI = "tr-TR-EmelNeural"
 ORNEKLEME_HIZI = 24000  # edge-tts çıktısıyla aynı
 
@@ -159,45 +179,79 @@ class GercekSensor(MesafeSensoru):
 
 class SimulasyonSensoru(MesafeSensoru):
     """
-    Gerçekçi engel senaryosu, döngü halinde tekrarlar:
-      3 m'de bekle → yavaşça yaklaş (yürüme hızı) → 0,4 m'de kısa dur →
-      uzaklaş → 3 m'de bekle.
-    Her okumaya küçük Gauss gürültüsü eklenir, ara sıra yapay okuma hatası atılır.
+    Gerçekçi senaryolar, döngü halinde tekrarlar. Her parça (süre sn,
+    başlangıç m, bitiş m) olarak verilir ve doğrusal ilerler. 2 m'nin
+    üstü gerçek sensördeki gibi "menzil dışı" (None) döner.
+
+    Senaryolar:
+      yaklasma      : 1 m/s ile duvara yürü, dibinde dur, geri çekil → uyarı beklenir
+      duvar_yaninda : duvarın 45 cm önünde dur, sonra yan dön → uyarı beklenmez
+      kalabalik     : önündeki kişi aynı hızda yürüyor, ara sıra yavaşlıyor → uyarı beklenmez
+      bas_cevirme   : dururken başını sağa sola çevir, mesafe sıçrar → uyarı beklenmez
+      karisik       : hepsi art arda
     """
 
     ad = "simulasyon"
 
-    def __init__(self, hata_orani=SIM_HATA_ORANI, gurultu_m=0.02, ariza=None):
+    SENARYOLAR = {
+        "yaklasma": [
+            (2.0, 3.0, 3.0),   # uzakta, engel yok
+            (2.5, 3.0, 0.5),   # 1 m/s ile duvara yürüme
+            (3.0, 0.5, 0.5),   # duvarın dibinde durma (sessiz olmalı)
+            (2.0, 0.5, 1.5),   # geri çekilme
+            (1.5, 3.0, 3.0),
+        ],
+        "duvar_yaninda": [
+            (6.0, 0.45, 0.45),  # duvarın önünde duruyor
+            (3.0, 0.90, 0.90),  # yan döndü, köşe
+            (3.0, 0.45, 0.45),
+        ],
+        "kalabalik": [
+            (3.0, 1.00, 1.05),  # önündeki kişi aynı hızda yürüyor
+            (1.5, 1.05, 0.80),  # kişi biraz yavaşladı (0,17 m/s)
+            (2.0, 0.80, 1.00),  # tekrar açıldı
+            (3.0, 1.00, 0.95),
+        ],
+        "bas_cevirme": [
+            (1.2, 3.0, 3.0),    # karşı boş
+            (1.0, 0.80, 0.80),  # baş sola döndü: yan duvar
+            (1.2, 3.0, 3.0),
+            (0.8, 1.30, 1.30),  # baş sağa döndü: dolap
+            (1.0, 3.0, 3.0),
+            (0.6, 0.60, 0.60),
+        ],
+    }
+    SENARYOLAR["karisik"] = (SENARYOLAR["yaklasma"] + SENARYOLAR["duvar_yaninda"]
+                             + SENARYOLAR["kalabalik"] + SENARYOLAR["bas_cevirme"])
+
+    def __init__(self, senaryo="karisik", hata_orani=SIM_HATA_ORANI, gurultu_m=0.02, ariza=None):
+        if senaryo not in self.SENARYOLAR:
+            raise ValueError(f"bilinmeyen senaryo {senaryo!r}, seçenekler: {', '.join(self.SENARYOLAR)}")
+        self.senaryo_adi = senaryo
+        self.senaryo = self.SENARYOLAR[senaryo]
+        self.ad = f"simulasyon ({senaryo})"
         self.hata_orani = hata_orani
         self.gurultu_m = gurultu_m
         # ariza=(başlangıç sn, süre sn): bu aralıkta her okuma hata verir (arıza testi).
         # Süre, sensör yeniden başlatılsa da ilk başlatmadan itibaren sayılır.
         self.ariza = ariza
         self._ilk_baslatma = None
-        # (süre sn, başlangıç m, bitiş m)
-        self.senaryo = [
-            (2.0, 3.0, 3.0),   # uzakta, engel yok
-            (8.0, 3.0, 0.4),   # ~0,33 m/s ile yaklaşma
-            (2.0, 0.4, 0.4),   # engelin dibinde bekleme
-            (6.0, 0.4, 3.0),   # uzaklaşma
-            (2.0, 3.0, 3.0),
-        ]
-        self.toplam_sure = sum(s[0] for s in self.senaryo)
+        self.toplam_sure = sum(p[0] for p in self.senaryo)
         self.t0 = None
 
     def baslat(self):
-        self.t0 = time.monotonic()
         if self._ilk_baslatma is None:
-            self._ilk_baslatma = self.t0
+            self._ilk_baslatma = time.monotonic()
+        # Senaryo saati ilk başlatmadan sayılır, yeniden başlatma senaryoyu sıfırlamaz
+        self.t0 = self._ilk_baslatma
 
-    def gercek_mesafe(self):
-        t = (time.monotonic() - self.t0) % self.toplam_sure
+    def gercek_mesafe(self, t=None):
+        if t is None:
+            t = time.monotonic() - self.t0
+        t = t % self.toplam_sure
         for sure, bas, bit in self.senaryo:
             if t < sure:
-                oran = t / sure
-                # yumuşak hızlanma/yavaşlama
-                oran = 0.5 - 0.5 * math.cos(math.pi * oran)
-                return bas + (bit - bas) * oran
+                return bas + (bit - bas) * (t / sure)
             t -= sure
         return self.senaryo[-1][2]
 
@@ -216,14 +270,14 @@ class SimulasyonSensoru(MesafeSensoru):
         return max(0.03, d)
 
 
-def sensor_olustur(mod=None, ariza=None):
-    """ariza=(başlangıç sn, süre sn) sadece simülasyonda kullanılır."""
+def sensor_olustur(mod=None, ariza=None, senaryo="karisik"):
+    """ariza=(başlangıç sn, süre sn) ve senaryo sadece simülasyonda kullanılır."""
     mod = (mod or SENSOR_MODU).strip().lower()
     if mod in ("gercek", "gerçek"):
         return GercekSensor()
     if mod not in ("simulasyon", "simülasyon"):
         print(f"⚠️  [GÜVENLİK] Bilinmeyen SENSOR_MODU={mod!r}, simülasyon kullanılıyor")
-    return SimulasyonSensoru(ariza=ariza)
+    return SimulasyonSensoru(senaryo=senaryo, ariza=ariza)
 
 
 class SensorThread(threading.Thread):
@@ -358,118 +412,183 @@ class SensorThread(threading.Thread):
         self.durdur_olayi.set()
 
 
-# ═════════════════════════ UYARI MANTIĞI ═════════════════════════
+# ═════════════════════════ ÇARPIŞMA MANTIĞI ═════════════════════════
 SEVIYE_YOK = 0
-SEVIYE_UYARI = 1
+SEVIYE_YAKLASMA = 1
 SEVIYE_ACIL = 2
-SEVIYE_ADI = {SEVIYE_YOK: "yok", SEVIYE_UYARI: "UYARI", SEVIYE_ACIL: "ACİL"}
+SEVIYE_ADI = {SEVIYE_YOK: "yok", SEVIYE_YAKLASMA: "YAKLAŞMA", SEVIYE_ACIL: "ACİL"}
+
+OLAY_TIK = "tik"
+OLAY_DUR = "dur"
 
 
-class UyariMantigi:
+class CarpismaMantigi:
     """
-    Mesafe → uyarı seviyesi, histerezisli durum makinesi.
+    Mesafe okumalarından yaklaşma hızını ve çarpışmaya kalan süreyi (TTC) hesaplar.
 
-    Seviyeye giriş eşiğin altına inince, çıkış eşik + histerezisin üstüne
-    çıkınca olur. Böylece eşiğin etrafındaki titremeler uyarıyı açıp kapatmaz.
+    - Son PENCERE_S saniyedeki okumalara doğru uydurulur, eğimi yaklaşma hızıdır.
+      Tek tek okumalar yerine eğim kullanmak sensör gürültüsünü bastırır.
+    - Ardışık iki okuma arasında SICRAMA_M'den büyük fark fiziksel bir yürüme
+      olamaz: baş çevrildi ya da önüne başka bir şey girdi. Pencere sıfırlanır,
+      böylece baş çevirmek sahte bir "hızlı yaklaşma" üretmez.
+    - Hız MIN_YAKLASMA_HIZI'nın altındaysa (duruyorsun ya da önündeki kişi
+      seninle aynı hızda yürüyor) TTC sonsuzdur, uyarı yoktur.
 
-    Ne zaman ses çalınır:
-      - UYARI'ya girince "Dikkat" (son Dikkat'ten bu yana bekleme süresi geçtiyse)
-      - ACİL'e girince her zaman "Dur" (bu bir tırmanmadır)
-      - Seviye sürdükçe bekleme süresi dolunca hatırlatma olarak tekrar
-      - ACİL'deyken engel ACIL_YAKLASMA_M kadar daha yaklaşırsa beklemeden "Dur"
+    guncelle() her okumada çağrılır ve bu okumada yapılacak işlerin listesini döner:
+      (OLAY_TIK, güç 0..1)  → tık sesi + kısa titreşim
+      (OLAY_DUR, ttc)       → bip + "Dur" + uzun titreşim
     """
 
-    def __init__(self, uyari_esigi=UYARI_ESIGI_M, acil_esigi=ACIL_ESIGI_M,
-                 histerezis=HISTEREZIS_M, bekleme=UYARI_BEKLEME_S,
-                 acil_yaklasma=ACIL_YAKLASMA_M, saat=time.monotonic):
-        if acil_esigi >= uyari_esigi:
-            raise ValueError(f"ACIL_ESIGI_M ({acil_esigi}) UYARI_ESIGI_M'den ({uyari_esigi}) küçük olmalı")
-        self.uyari_esigi = uyari_esigi
-        self.acil_esigi = acil_esigi
-        self.histerezis = histerezis
-        self.bekleme = bekleme
-        self.acil_yaklasma = acil_yaklasma
+    PENCERE_S = 0.5      # hız hesabı için bakılan geçmiş
+    MIN_ORNEK = 6        # hız hesabı için gereken en az okuma (~0,35 sn)
+    SICRAMA_M = 0.30     # iki okuma arasında bundan büyük fark = yeni nesne
+    GUVEN_KATSAYISI = 3.0  # hız, standart hatasının bu katından küçükse "hareket yok"
+    # Sensör gürültüsü en az bu kadar varsayılır (az örnekte kendini kandırmasın).
+    # Gerçek sensörün gürültüsü ölçülünce SENSOR_GURULTU_M ile ayarlanır.
+    GURULTU_TABANI_M = SENSOR_GURULTU_M
+    TIK_ARALIK_ACIL = 0.12
+    TIK_ARALIK_YAVAS = 0.60
+    DUR_SONRASI_SUSMA_S = 0.9  # "Dur" sesi bitene kadar tık çalma
+
+    def __init__(self, ttc_uyari=TTC_UYARI_S, ttc_acil=TTC_ACIL_S,
+                 min_hiz=MIN_YAKLASMA_HIZI, acil_tekrar=ACIL_TEKRAR_S, saat=time.monotonic):
+        if ttc_acil >= ttc_uyari:
+            raise ValueError(f"TTC_ACIL_S ({ttc_acil}) TTC_UYARI_S'den ({ttc_uyari}) küçük olmalı")
+        self.ttc_uyari = ttc_uyari
+        self.ttc_acil = ttc_acil
+        self.min_hiz = min_hiz
+        self.acil_tekrar = acil_tekrar
         self.saat = saat
         self.seviye = SEVIYE_YOK
-        self._son_calma = {SEVIYE_UYARI: -math.inf, SEVIYE_ACIL: -math.inf}
-        self._son_acil_mesafe = math.inf
+        self.hiz = 0.0          # m/s, pozitif = yaklaşıyor
+        self.ttc = math.inf
+        self._pencere = deque()
+        self._son_tik = -math.inf
+        self._son_dur = -math.inf
+        self._acil_ardisik = 0
+        self._dur_soylendi = False
 
-    def _yeni_seviye(self, d):
-        s = self.seviye
-        # Yukarı çıkış (yaklaşma): eşiğin altı
-        if d < self.acil_esigi:
+    def _hiz_hesapla(self):
+        if len(self._pencere) < self.MIN_ORNEK:
+            return 0.0
+        t = np.array([p[0] for p in self._pencere])
+        d = np.array([p[1] for p in self._pencere])
+        if t[-1] - t[0] < 0.3:
+            return 0.0
+        t = t - t.mean()
+        egim, kesim = np.polyfit(t, d, 1)
+        # Güven kontrolü: eğim, gürültünün tek başına üretebileceğinden belirgin
+        # büyük değilse hareket yok say. Durana sahte "Dur" demeyi önler.
+        artik = d - (egim * t + kesim)
+        gurultu = max(self.GURULTU_TABANI_M, math.sqrt(float(np.sum(artik ** 2)) / (len(d) - 2)))
+        std_hata = gurultu / math.sqrt(float(np.sum(t ** 2)))
+        if abs(egim) < self.GUVEN_KATSAYISI * std_hata:
+            return 0.0
+        return float(-egim)
+
+    def _yeni_seviye(self):
+        ttc, s = self.ttc, self.seviye
+        if ttc < self.ttc_acil:
             return SEVIYE_ACIL
-        if s == SEVIYE_ACIL:
-            # ACİL'den çıkmak için acil eşiği + histerezisi geçmeli
-            if d <= self.acil_esigi + self.histerezis:
-                return SEVIYE_ACIL
-            s = SEVIYE_UYARI
-        if d < self.uyari_esigi:
-            return SEVIYE_UYARI
-        if s == SEVIYE_UYARI and d <= self.uyari_esigi + self.histerezis:
-            return SEVIYE_UYARI
+        if s == SEVIYE_ACIL and ttc < self.ttc_acil * 1.3:
+            return SEVIYE_ACIL  # histerezis: titreşen TTC uyarıyı açıp kapatmasın
+        if ttc < self.ttc_uyari:
+            return SEVIYE_YAKLASMA
+        if s >= SEVIYE_YAKLASMA and ttc < self.ttc_uyari * 1.25:
+            return SEVIYE_YAKLASMA
         return SEVIYE_YOK
 
     def guncelle(self, mesafe):
-        """
-        Yeni okumayı işler. Çalınması gereken bir uyarı varsa
-        (seviye, sebep) döner, yoksa None.
-        """
-        d = math.inf if mesafe is None else mesafe
         simdi = self.saat()
-        eski = self.seviye
-        yeni = self._yeni_seviye(d)
-        self.seviye = yeni
+        if mesafe is None:
+            self._pencere.clear()  # menzilde engel yok
+        else:
+            if self._pencere:
+                # Son üç okumanın ortancasıyla karşılaştır: tek gürültülü okuma sıçramayı gizlemesin
+                son3 = sorted(p[1] for p in list(self._pencere)[-3:])
+                if abs(mesafe - son3[len(son3) // 2]) > self.SICRAMA_M:
+                    self._pencere.clear()  # baş çevrildi ya da yeni nesne
+            self._pencere.append((simdi, mesafe))
+            while self._pencere and simdi - self._pencere[0][0] > self.PENCERE_S:
+                self._pencere.popleft()
 
+        self.hiz = self._hiz_hesapla() if mesafe is not None else 0.0
+        self.ttc = mesafe / self.hiz if (mesafe is not None and self.hiz > self.min_hiz) else math.inf
+
+        self.seviye = yeni = self._yeni_seviye()
+        olaylar = []
+        if yeni < SEVIYE_ACIL:
+            self._dur_soylendi = False  # acil bitti, bir sonraki acil yeniden "Dur" der
         if yeni == SEVIYE_YOK:
-            self._son_acil_mesafe = math.inf
-            return None
+            self._acil_ardisik = 0
+            return olaylar
 
-        if yeni < eski:
-            # Engel uzaklaşıyor: alt seviyenin hatırlatması tam bekleme süresi sonra gelsin
-            self._son_calma[yeni] = simdi
-            return None
+        # "Dur" için acil durum art arda iki okumada görülmeli (tek gürültülü okuma yetmez)
+        self._acil_ardisik = self._acil_ardisik + 1 if self.ttc < self.ttc_acil else 0
+        if (yeni == SEVIYE_ACIL and self._acil_ardisik >= 2 and not self._dur_soylendi
+                and simdi - self._son_dur >= self.acil_tekrar):
+            self._son_dur = simdi
+            self._dur_soylendi = True
+            olaylar.append((OLAY_DUR, self.ttc))
+            return olaylar
 
-        gecen = simdi - self._son_calma[yeni]
-        sebep = None
-        if yeni > eski:
-            if yeni == SEVIYE_ACIL:
-                sebep = "acil eşiği aşıldı"
-            elif gecen >= self.bekleme:
-                sebep = "uyarı eşiği aşıldı"
-        elif yeni == SEVIYE_ACIL and d <= self._son_acil_mesafe - self.acil_yaklasma:
-            sebep = "engel yaklaşmaya devam ediyor"
-        elif gecen >= self.bekleme and yeni == eski:
-            sebep = "hatırlatma"
-
-        if sebep is None:
-            return None
-        self._son_calma[yeni] = simdi
+        if simdi - self._son_dur < self.DUR_SONRASI_SUSMA_S:
+            return olaylar
+        # Park sensörü: çarpışma yaklaştıkça tıklar sıklaşır ve güçlenir
         if yeni == SEVIYE_ACIL:
-            self._son_acil_mesafe = d
-        return yeni, sebep
+            aralik, guc = self.TIK_ARALIK_ACIL, 1.0
+        else:
+            oran = (min(self.ttc, self.ttc_uyari) - self.ttc_acil) / (self.ttc_uyari - self.ttc_acil)
+            oran = min(1.0, max(0.0, oran))  # 0 = acile yakın, 1 = uyarının başı
+            aralik = self.TIK_ARALIK_ACIL + oran * (self.TIK_ARALIK_YAVAS - self.TIK_ARALIK_ACIL)
+            guc = 0.9 - 0.5 * oran
+        if simdi - self._son_tik >= aralik:
+            self._son_tik = simdi
+            olaylar.append((OLAY_TIK, guc))
+        return olaylar
 
 
 # ═════════════════════════ SES SİSTEMİ ═════════════════════════
-class CikisUyanikTutucu(threading.Thread):
+class TikKanali(threading.Thread):
     """
-    Varsayılan ses çıkışına sürekli sessizlik gönderir. PipeWire, çalan bir
-    akış olduğu sürece çıkışı uyutmaz, böylece Bluetooth bağlantısı açık kalır
-    ve uyarılar baştan kesilmeden, gecikmesiz çalar. Bedeli: kulaklık pili
-    biraz daha hızlı biter.
+    Varsayılan ses çıkışına sürekli açık, düşük gecikmeli bir akış.
+
+    İki işi var:
+      1. Sessizlik göndererek Bluetooth çıkışını uyanık tutar. Uyuyan çıkış,
+         uyanırken sesin başını yutuyordu.
+      2. Tık seslerini bu akışa karıştırır. Tıklar ayrı bir akışta olduğu için
+         o an çalan konuşmayı kesmez, üstüne karışır. Her tık için yeni süreç
+         açılmadığından gecikme ~50 ms + Bluetooth gecikmesidir.
 
     Varsayılan çıkış değişirse (başka kulaklık bağlandıysa) akışı yeniden açar.
     pacat ölürse 2 sn sonra yeniden başlatır.
     """
 
-    ORNEKLEME = 8000
-    PARCA = b"\x00\x00" * 800  # 100 ms sessizlik
+    ORNEKLEME = 16000
+    PARCA_ORNEK = 320  # 20 ms
 
     def __init__(self):
-        super().__init__(daemon=True, name="ses-uyanik")
+        super().__init__(daemon=True, name="ses-tik")
         self.durdur_olayi = threading.Event()
         self._proc = None
         self._kilit = threading.Lock()
+        self._tampon = np.zeros(0, dtype=np.float32)
+
+    @classmethod
+    def tik_sesi(cls, guc):
+        """25 ms'lik yumuşak tık. Güç arttıkça hem yükselir hem tizleşir."""
+        n = int(cls.ORNEKLEME * 0.025)
+        t = np.arange(n) / cls.ORNEKLEME
+        frekans = 1200 + 800 * guc
+        zarf = np.exp(-t * 180)  # hızlı sönümlenen vuruş
+        return (np.sin(2 * np.pi * frekans * t) * zarf * (0.15 + 0.45 * guc)).astype(np.float32)
+
+    def tik(self, guc):
+        ses = self.tik_sesi(guc)
+        with self._kilit:
+            if len(self._tampon) < len(ses):
+                self._tampon = np.concatenate([self._tampon, np.zeros(len(ses) - len(self._tampon), np.float32)])
+            self._tampon[:len(ses)] += ses
 
     @staticmethod
     def _varsayilan_cikis():
@@ -482,8 +601,8 @@ class CikisUyanikTutucu(threading.Thread):
     def _baslat(self):
         return subprocess.Popen(
             ["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
-             f"--rate={self.ORNEKLEME}", "--client-name=guvenlik-uyanik",
-             "--stream-name=sessizlik"],
+             f"--rate={self.ORNEKLEME}", "--latency-msec=50",
+             "--client-name=guvenlik-tik", "--stream-name=tik-ve-sessizlik"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _kapat(self):
@@ -499,6 +618,14 @@ class CikisUyanikTutucu(threading.Thread):
                 p.stdin.close()
             except Exception:
                 pass  # süreç öldüğü için boru kırık olabilir, önemsiz
+
+    def _sonraki_parca(self):
+        with self._kilit:
+            parca = self._tampon[:self.PARCA_ORNEK]
+            self._tampon = self._tampon[self.PARCA_ORNEK:]
+        if len(parca) < self.PARCA_ORNEK:
+            parca = np.concatenate([parca, np.zeros(self.PARCA_ORNEK - len(parca), np.float32)])
+        return (np.clip(parca, -1, 1) * 32767).astype(np.int16).tobytes()
 
     def run(self):
         cikis = None
@@ -521,7 +648,7 @@ class CikisUyanikTutucu(threading.Thread):
                         self._proc = self._baslat()
                     p = self._proc
                 # pacat tamponu dolunca yazma bloklanır, döngü gerçek zamanlı ilerler
-                p.stdin.write(self.PARCA)
+                p.stdin.write(self._sonraki_parca())
                 p.stdin.flush()
             except Exception:
                 self._kapat()
@@ -531,6 +658,59 @@ class CikisUyanikTutucu(threading.Thread):
     def durdur(self):
         self.durdur_olayi.set()
         self._kapat()
+
+
+class Titresim:
+    """
+    Sapa takılacak titreşim motoru. Motor bir transistör ya da sürücü kartı
+    üzerinden GPIO'ya bağlanmalı, doğrudan pine bağlanmamalı.
+    TITRESIM_PIN boşsa hiçbir şey yapmaz.
+    """
+
+    def __init__(self, pin=TITRESIM_PIN):
+        self.cihaz = None
+        self._zamanlayici = None
+        self._kilit = threading.Lock()
+        if not pin:
+            return
+        try:
+            from gpiozero import PWMOutputDevice
+            self.cihaz = PWMOutputDevice(int(pin), frequency=200)
+            _log(f"📳 Titreşim motoru GPIO{pin} üzerinde hazır")
+        except Exception as e:
+            _log(f"⚠️  Titreşim motoru açılamadı (GPIO{pin}): {type(e).__name__}: {e}")
+
+    @property
+    def var(self):
+        return self.cihaz is not None
+
+    def titret(self, guc, sure_s):
+        if self.cihaz is None:
+            return
+        with self._kilit:
+            try:
+                if self._zamanlayici is not None:
+                    self._zamanlayici.cancel()
+                self.cihaz.value = max(0.0, min(1.0, guc))
+                self._zamanlayici = threading.Timer(sure_s, self._sustur)
+                self._zamanlayici.daemon = True
+                self._zamanlayici.start()
+            except Exception as e:
+                _log(f"⚠️  Titreşim hatası: {e}")
+
+    def _sustur(self):
+        try:
+            self.cihaz.value = 0
+        except Exception:
+            pass
+
+    def kapat(self):
+        if self.cihaz is not None:
+            self._sustur()
+            try:
+                self.cihaz.close()
+            except Exception:
+                pass
 
 
 ONCELIK_NORMAL = "normal"
@@ -558,10 +738,10 @@ class SesYoneticisi:
         self._proc_oncelik = None
         self._proc_dosya = None
         threading.Thread(target=self._acil_dongusu, daemon=True, name="ses-acil").start()
-        self._uyanik = None
-        if SES_UYANIK_TUT and not sessiz:
-            self._uyanik = CikisUyanikTutucu()
-            self._uyanik.start()
+        self._tik_kanali = None
+        if not sessiz:
+            self._tik_kanali = TikKanali()
+            self._tik_kanali.start()
 
     def _baslat(self, dosya, oncelik):
         """Kilit içinde çağrılır."""
@@ -639,13 +819,18 @@ class SesYoneticisi:
             self._bitti(proc)
             return proc.returncode == 0 and not getattr(proc, "kesildi", False)
 
+    def tik(self, guc):
+        """Konuşmayı kesmeden üstüne karışan kısa tık."""
+        if self._tik_kanali is not None:
+            self._tik_kanali.tik(guc)
+
     @property
     def acil_caliyor(self):
         return self._acil_mesgul
 
     def durdur(self):
-        if self._uyanik is not None:
-            self._uyanik.durdur()
+        if self._tik_kanali is not None:
+            self._tik_kanali.durdur()
         with self._kosul:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.terminate()
@@ -656,7 +841,8 @@ class InternetIzleyici(threading.Thread):
     """
     Her INTERNET_KONTROL_S saniyede bir bağlantıyı kontrol eder.
     Yanlış alarm olmasın diye kopma için art arda 2 başarısız kontrol gerekir.
-    Durum değişince ilgili ses dosyasını bir kere çalar.
+    Durum değişince konuşma yerine kısa bir ton çalar (alçalan = koptu,
+    yükselen = geldi). Ayrıntı "durum ne" diye sorulunca söylenir.
     """
 
     HEDEFLER = [("1.1.1.1", 53), ("8.8.8.8", 53), ("generativelanguage.googleapis.com", 443)]
@@ -693,7 +879,7 @@ class InternetIzleyici(threading.Thread):
                 if var:
                     self._basarisiz = 0
                     if self.bagli is False:
-                        self._bildir("internet_geldi", "🌐 İnternet bağlantısı geri geldi")
+                        self._bildir("ton_internet_var", "🌐 İnternet bağlantısı geri geldi")
                     elif self.bagli is None:
                         _log("🌐 İnternet bağlantısı var")
                     self.bagli = True
@@ -701,7 +887,7 @@ class InternetIzleyici(threading.Thread):
                     self._basarisiz += 1
                     if self._basarisiz >= self.kopma_esigi and self.bagli is not False:
                         self.bagli = False
-                        self._bildir("internet_kesildi",
+                        self._bildir("ton_internet_yok",
                                      "📵 İnternet bağlantısı kesildi, sadece engel uyarısı aktif")
             except Exception as e:
                 _log(f"⚠️  [İNTERNET] kontrol hatası: {e}")
@@ -729,6 +915,30 @@ def bip_uret(yol, frekans=1000, sure=0.15, tekrar=2, ara=0.08, ses_seviyesi=0.6)
         if i < tekrar - 1:
             parcalar.append(sessizlik)
     _wav_yaz(yol, np.concatenate(parcalar))
+
+
+def _ton(notalar, nota_s=0.09, ara_s=0.03, seviye=0.35):
+    """Kısa melodik ton dizisi (Hz listesi)."""
+    parcalar = []
+    for f in notalar:
+        t = np.arange(int(ORNEKLEME_HIZI * nota_s)) / ORNEKLEME_HIZI
+        zarf = np.minimum(1, np.minimum(t, t[::-1]) / 0.01)  # 10 ms yumuşak giriş/çıkış
+        parcalar += [np.sin(2 * np.pi * f * t) * zarf * seviye, np.zeros(int(ORNEKLEME_HIZI * ara_s))]
+    return np.concatenate(parcalar)
+
+
+def tonlari_uret(zorla=False):
+    """Sözsüz durum tonları. numpy ile üretilir, internet gerekmez."""
+    os.makedirs(SES_DIZINI, exist_ok=True)
+    tanim = {
+        "ton_internet_yok": [784, 523],        # alçalan: bir şey gitti
+        "ton_internet_var": [523, 784],        # yükselen: bir şey geldi
+        "ton_onay": [988],                     # tek kısa nota: ayar değişti
+        "ton_hazir": [523, 659, 784],          # açılış
+    }
+    for ad, notalar in tanim.items():
+        if zorla or not os.path.exists(ses_yolu(ad)):
+            _wav_yaz(ses_yolu(ad), _ton(notalar))
 
 
 def _wav_yaz(yol, ornekler):
@@ -763,6 +973,7 @@ def sesleri_uret(zorla=False):
     import edge_tts
 
     os.makedirs(SES_DIZINI, exist_ok=True)
+    tonlari_uret(zorla=zorla)
     bip = ses_yolu("bip")
     if zorla or not os.path.exists(bip):
         bip_uret(bip)
@@ -791,7 +1002,7 @@ def sesleri_uret(zorla=False):
 
 
 def eksik_sesler():
-    adlar = list(SES_DOSYALARI) + ["bip", "bip_dur"]
+    adlar = list(SES_DOSYALARI) + ["bip", "bip_dur"] + TONLAR
     return [ad for ad in adlar if not os.path.exists(ses_yolu(ad))]
 
 
@@ -799,45 +1010,49 @@ def eksik_sesler():
 class GuvenlikSistemi:
     """
     Kullanım (ana programdan):
-        guvenlik = GuvenlikSistemi().baslat()
+        guvenlik = GuvenlikSistemi(ses=ses_yoneticisi).baslat()
         guvenlik.ses.normal_cal("/tmp/tts.mp3")   # normal öncelikli konuşma
+        guvenlik.durum_soyle()                    # "İnternet var. Mesafe sensörü çalışıyor"
+        guvenlik.son_mesafe                       # tam öndeki ölçülen mesafe (m) ya da None
     """
 
-    UYARI_SESLERI = {SEVIYE_UYARI: "dikkat", SEVIYE_ACIL: "bip_dur"}
-
-    def __init__(self, sensor=None, ses=None, sessiz=False, ekran=False, internet_izle=True):
+    def __init__(self, sensor=None, ses=None, sessiz=False, ekran=False, internet_izle=True,
+                 titresim=None):
         self.sensor = sensor or sensor_olustur()
         self.ses = ses or SesYoneticisi(sessiz=sessiz)
-        self.mantik = UyariMantigi()
+        self.titresim = titresim or Titresim()
+        self.mantik = CarpismaMantigi()
         self.ekran = ekran
         self.sensor_thread = SensorThread(self.sensor, self._okuma_geldi,
                                           ariza_bildir=self._ariza_degisti)
         self.internet = InternetIzleyici(self.ses) if internet_izle else None
-        self.son_uyari = None
-        self._sayac = 0
+        self.sayac = {OLAY_TIK: 0, OLAY_DUR: 0}
+        self._ekran_sayac = 0
 
     def baslat(self):
+        tonlari_uret()  # internetsiz üretilebilir
+        if not os.path.exists(ses_yolu("bip")):
+            bip_uret(ses_yolu("bip"))
         eksik = eksik_sesler()
-        if "bip" in eksik:
-            os.makedirs(SES_DIZINI, exist_ok=True)
-            bip_uret(ses_yolu("bip"))  # internetsiz üretilebilir
-            eksik.remove("bip")
         if eksik:
             _log(f"⚠️  [GÜVENLİK] Eksik ses dosyaları: {', '.join(eksik)} — "
                  f"internet varken 'python3 guvenlik.py --sesleri-uret' çalıştırın. "
                  f"Eksik uyarılar yerine bip çalacak.")
         _log(f"🛡️  Güvenlik katmanı başlıyor | sensör: {self.sensor.ad} | "
-             f"uyarı < {UYARI_ESIGI_M:.2f} m | acil < {ACIL_ESIGI_M:.2f} m | "
-             f"histerezis {HISTEREZIS_M:.2f} m | bekleme {UYARI_BEKLEME_S:.0f} s")
+             f"tık < {TTC_UYARI_S:.1f} s | Dur < {TTC_ACIL_S:.1f} s | "
+             f"en düşük yaklaşma hızı {MIN_YAKLASMA_HIZI:.2f} m/s | "
+             f"titreşim: {'var' if self.titresim.var else 'yok'}")
         self.sensor_thread.start()
         if self.internet:
             self.internet.start()
         return self
 
+    # ---------- arıza ----------
     def _ariza_degisti(self, arizali):
         if arizali:
             # Kullanıcı artık engel uyarısı alamayacak: bunu acil öncelikle söyle
             self.ses.acil_cal(self._dosya_ya_da_bip("sensor_calismiyor"))
+            self.titresim.titret(1.0, 0.8)
         else:
             threading.Thread(target=self.ses.normal_cal,
                              args=(self._dosya_ya_da_bip("sensor_calisiyor"),),
@@ -848,48 +1063,61 @@ class GuvenlikSistemi:
         yol = ses_yolu(ad)
         return yol if os.path.exists(yol) else ses_yolu("bip")
 
+    # ---------- okuma ----------
     def _okuma_geldi(self, mesafe):
-        sonuc = self.mantik.guncelle(mesafe)
+        olaylar = self.mantik.guncelle(mesafe)
         if self.ekran:
             self._ekrana_yaz(mesafe)
-        if sonuc is None:
-            return
-        seviye, sebep = sonuc
-        ad = self.UYARI_SESLERI[seviye]
-        dosya = ses_yolu(ad)
-        if not os.path.exists(dosya):
-            dosya = ses_yolu("bip")
-        self.ses.acil_cal(dosya)
-        self.son_uyari = (time.monotonic(), seviye, sebep, mesafe)
-        mesafe_str = "menzil dışı" if mesafe is None else f"{mesafe:.2f} m"
-        ikon = "🛑" if seviye == SEVIYE_ACIL else "⚠️ "
-        if self.ekran and sys.stdout.isatty():
-            print()  # durum satırını koru
-        _log(f"{ikon} {SEVIYE_ADI[seviye]} — {mesafe_str} — {sebep} → {ad}.wav")
+        for olay, deger in olaylar:
+            self.sayac[olay] += 1
+            if olay == OLAY_TIK:
+                self.ses.tik(deger)
+                self.titresim.titret(deger, 0.05)
+            elif olay == OLAY_DUR:
+                self.ses.acil_cal(self._dosya_ya_da_bip("bip_dur"))
+                self.titresim.titret(1.0, 0.4)
+                if self.ekran and sys.stdout.isatty():
+                    print()  # durum satırını koru
+                _log(f"🛑 DUR — {mesafe:.2f} m, {self.mantik.hiz:.2f} m/s ile yaklaşıyor, "
+                     f"çarpışmaya {deger:.1f} s")
 
     def _ekrana_yaz(self, mesafe):
-        self._sayac += 1
+        self._ekran_sayac += 1
+        m = "  > 2.00 m" if mesafe is None else f"{mesafe:6.2f} m"
+        ttc = "   —  " if math.isinf(self.mantik.ttc) else f"{self.mantik.ttc:4.1f} s"
         seviye = SEVIYE_ADI[self.mantik.seviye]
-        if mesafe is None:
-            m, cubuk = "  > 2.00 m", ""
-        else:
-            m = f"{mesafe:6.2f} m"
-            cubuk = "█" * int(max(0, 3.0 - mesafe) / 3.0 * 30)
-        satir = f"📏 {m}  [{seviye:5}]  {cubuk:<30}"
+        satir = f"📏 {m} | hız {self.mantik.hiz:+5.2f} m/s | çarpışmaya {ttc} | {seviye:8}"
         if sys.stdout.isatty():
             print("\r" + satir, end="", flush=True)
-        elif self._sayac % 5 == 0:  # dosyaya yönlendirildiyse satır satır, seyrek
-            print(f"[{time.strftime('%H:%M:%S')}] {satir.rstrip()}", flush=True)
+        elif self._ekran_sayac % 5 == 0:  # dosyaya yönlendirildiyse satır satır, seyrek
+            print(f"[{time.strftime('%H:%M:%S')}] {satir}", flush=True)
 
+    # ---------- durum ----------
     @property
     def internet_var(self):
         return None if self.internet is None else self.internet.bagli
+
+    @property
+    def son_mesafe(self):
+        """Son 0,5 sn içinde okunan mesafe, yoksa None."""
+        t = self.sensor_thread.son_okuma_zamani
+        if t is None or time.monotonic() - t > 0.5:
+            return None
+        return self.sensor_thread.son_mesafe
+
+    def durum_soyle(self):
+        """İnternet ve sensör durumunu önceden kaydedilmiş seslerle söyler (internetsiz)."""
+        parcalar = ["durum_internet_var" if self.internet_var else "durum_internet_yok",
+                    "durum_sensor_yok" if self.sensor_thread.arizali else "durum_sensor_iyi"]
+        for p in parcalar:
+            self.ses.normal_cal(self._dosya_ya_da_bip(p))
 
     def durdur(self):
         self.sensor_thread.durdur()
         if self.internet:
             self.internet.durdur()
         self.ses.durdur()
+        self.titresim.kapat()
 
 
 # ═════════════════════════ TEK BAŞINA TEST ═════════════════════════
@@ -903,6 +1131,8 @@ def main():
     p.add_argument("--sessiz", action="store_true", help="ses çalma, sadece ekrana yaz")
     p.add_argument("--sure", type=float, default=0, help="bu kadar saniye sonra çık (0 = Ctrl+C'ye kadar)")
     p.add_argument("--internetsiz", action="store_true", help="internet izleyiciyi başlatma")
+    p.add_argument("--senaryo", default="karisik", choices=list(SimulasyonSensoru.SENARYOLAR),
+                   help="simülasyon senaryosu (varsayılan: karisik)")
     p.add_argument("--ariza", type=float, default=0, metavar="SN",
                    help="simülasyonda 3. saniyede başlayıp SN saniye süren sensör arızası")
     a = p.parse_args()
@@ -913,7 +1143,8 @@ def main():
         return
 
     ariza = (3.0, a.ariza) if a.ariza > 0 else None
-    sistem = GuvenlikSistemi(sensor=sensor_olustur(a.mod, ariza=ariza), sessiz=a.sessiz, ekran=True,
+    sistem = GuvenlikSistemi(sensor=sensor_olustur(a.mod, ariza=ariza, senaryo=a.senaryo),
+                             sessiz=a.sessiz, ekran=True,
                              internet_izle=not a.internetsiz).baslat()
     print("Ctrl+C ile çık\n")
     try:
@@ -924,7 +1155,8 @@ def main():
         pass
     finally:
         sistem.durdur()
-        print(f"\nÇıkış. Sensör hata sayısı: {sistem.sensor_thread.hata_sayisi}")
+        print(f"\nÇıkış. Tık: {sistem.sayac[OLAY_TIK]}, Dur: {sistem.sayac[OLAY_DUR]}, "
+              f"sensör hata sayısı: {sistem.sensor_thread.hata_sayisi}")
 
 
 if __name__ == "__main__":
