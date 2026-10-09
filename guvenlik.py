@@ -826,6 +826,29 @@ class SesYoneticisi:
             self._bitti(proc)
             return proc.returncode == 0 and not getattr(proc, "kesildi", False)
 
+    def akis_ac(self, ornekleme=24000):
+        """
+        Akan ses için normal öncelikli oynatıcı açar (Gemini Live cevapları).
+        Acil ses çalıyorsa bitmesini bekler. "Dur" ya da kısa basış bu akışı
+        normal bir ses gibi keser. Sessiz moddaysa None döner.
+        """
+        if self.sessiz:
+            return None
+        with self._kosul:
+            while self._acil_mesgul:
+                self._kosul.wait(0.1)
+            try:
+                proc = subprocess.Popen(
+                    ["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
+                     f"--rate={ornekleme}", "--latency-msec=100",
+                     "--client-name=gozluk-canli", "--stream-name=cevap"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                _log(f"⚠️  [SES] akış açılamadı: {e}")
+                return None
+            self._proc, self._proc_oncelik, self._proc_dosya = proc, ONCELIK_NORMAL, "<akış>"
+        return AkisOynatici(proc, self._bitti)
+
     def normal_kes(self):
         """O an çalan normal sesi (konuşmayı) keser. Kesildiyse True."""
         with self._kosul:
@@ -859,6 +882,71 @@ class SesYoneticisi:
 
 
 # ═════════════════════════ İNTERNET İZLEYİCİ ═════════════════════════
+class AkisOynatici:
+    """
+    Parça parça gelen PCM sesi çalar. Yazma kendi thread'inde yapılır, böylece
+    çağıran (asyncio döngüsü) pacat tamponu dolunca bloklanmaz.
+    """
+
+    def __init__(self, proc, bitti_cagir):
+        self.proc = proc
+        self._bitti_cagir = bitti_cagir
+        self._kuyruk = deque()
+        self._olay = threading.Event()
+        self._kapaniyor = False
+        threading.Thread(target=self._yazici, daemon=True, name="ses-akis").start()
+
+    @property
+    def kesildi(self):
+        return getattr(self.proc, "kesildi", False) or self.proc.poll() is not None
+
+    def yaz(self, veri):
+        if self.kesildi:
+            return False
+        self._kuyruk.append(veri)
+        self._olay.set()
+        return True
+
+    def bitir(self):
+        """Kalan sesi çalıp kapanır (beklemez)."""
+        self._kapaniyor = True
+        self._olay.set()
+
+    def kes(self):
+        self.proc.kesildi = True
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+        self.bitir()
+
+    def _yazici(self):
+        try:
+            while True:
+                self._olay.wait()
+                self._olay.clear()
+                while self._kuyruk:
+                    veri = self._kuyruk.popleft()
+                    if self.kesildi:
+                        self._kuyruk.clear()
+                        break
+                    self.proc.stdin.write(veri)
+                    self.proc.stdin.flush()
+                if self._kapaniyor or self.kesildi:
+                    break
+        except Exception:
+            pass  # süreç öldürüldüyse boru kırılır
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=30)
+        except Exception:
+            self.proc.kill()
+        self._bitti_cagir(self.proc)
+
+
 class InternetIzleyici(threading.Thread):
     """
     Her INTERNET_KONTROL_S saniyede bir bağlantıyı kontrol eder.

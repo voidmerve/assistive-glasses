@@ -4,6 +4,15 @@ Asistif Gözlük
 
 Görme engelli kullanıcı için Türkçe konuşan akıllı gözlük.
 
+YAPAY ZEKÂ:
+    Varsayılan: Gemini Live (canli.py). Cevaplar doğrudan ses olarak gelir,
+    mikrofon basılı tutulurken canlı akar, mesafe sensörden fonksiyonla alınır.
+    Önemli olaylar (aşağı basamak, yaya geçidi, trafik ışığı ...) kendiliğinden
+    söylenir, "sessiz ol" denince kapanır.
+    Live bağlı değilse (internet yok, kota bitti) otomatik olarak eski yola
+    döner: REST istek + edge-tts, o da yoksa sensörle cevap.
+    .env: AI_MOTORU=live | rest, OLAY_ARALIGI_S=5 (0 = olay gözcüsü kapalı)
+
 TASARIM İLKELERİ:
     - Varsayılan durum sessizlik. Kulak trafiği ve çevreyi dinlemek için lazım.
     - Engel uyarısını sadece mesafe sensörü verir (guvenlik.py): internetsiz,
@@ -225,11 +234,15 @@ class VoiceRecorder:
         self.lock = threading.Lock()
         self._preroll = deque()
         self._preroll_len = 0
+        self.dinleyici = None  # kayıt sırasında her mikrofon parçasıyla çağrılır
 
     def _callback(self, indata, frame_count, time_info, status):
         block = indata.copy()
         if self.recording:
             self.frames.append(block)
+            dinleyici = self.dinleyici
+            if dinleyici is not None:
+                dinleyici(block.tobytes())  # Gemini Live'a canlı akış
         else:
             self._preroll.append(block)
             self._preroll_len += len(block)
@@ -269,11 +282,12 @@ class VoiceRecorder:
                 return
             if not self.open():
                 return
-            self.frames = list(self._preroll)  # SPACE'ten önceki 0,6 sn
+            self.frames = list(self._preroll)  # basmadan önceki 0,6 sn
             self._preroll.clear()
             self._preroll_len = 0
             self.recording = True
-            print("\n🎙️  Kayıt başladı (SPACE'e tekrar bas → AI'ya gönder)...")
+            print("\n🎙️  Dinliyorum...")
+            return b"".join(f.tobytes() for f in self.frames)
 
     def stop(self, path="/tmp/prompt.wav"):
         with self.lock:
@@ -461,7 +475,8 @@ def konusmayi_kes():
         hazirlaniyor = _konusma_hazirlaniyor.is_set()
         _konusma_nesli += 1
     kesildi = ses_yoneticisi.normal_kes()
-    return kesildi or hazirlaniyor
+    canli_kesildi = canli.konusmayi_kes() if canli is not None else False
+    return kesildi or hazirlaniyor or canli_kesildi
 
 
 _konusma_hazirlaniyor = threading.Event()
@@ -622,6 +637,8 @@ def ayari_uygula(komut):
         ayarlar["konusma_duzeyi"] = komut
         ayarlari_kaydet()
         print(f"⚙️  Konuşma düzeyi: {komut}")
+        if canli is not None:
+            canli.ayar_bildir(komut)
         oynat(guvenlik.ses_yolu(f"duzey_{komut}"))
     elif komut == sesli_komut.KOMUT_DURUM:
         guvenlik_sistemi.durum_soyle()
@@ -783,34 +800,104 @@ def get_directions(origin, destination, mode="walking"):
         return None
 
 
-def navigasyon(hedef):
-    """Gemini'nin anladığı hedef → geocode → yürüyüş rotası → ilk adım."""
+def navigasyon_metni(hedef):
+    """Hedef → geocode → yürüyüş rotası → söylenecek metin."""
     print(f"\n📍 Navigasyon: '{hedef}'")
     if not GOOGLE_MAPS_API_KEY or maps_key_rejected:
-        konus("Navigasyon şu an kullanılamıyor.")
-        return
+        return "Navigasyon şu an kullanılamıyor."
     if not hedef:
-        konus("Nereye gitmek istediğini anlayamadım.")
-        return
+        return "Nereye gitmek istediğini anlayamadım."
     dest_coords, dest_formatted = geocode(hedef)
     if not dest_coords:
         if maps_key_rejected:
             print("  ❌ Maps anahtarı geçersiz, navigasyon bu oturumda kapatıldı")
-            konus("Navigasyon şu an kullanılamıyor.")
-        else:
-            konus(f"{hedef} adresi bulunamadı.")
-        return
+            return "Navigasyon şu an kullanılamıyor."
+        return f"{hedef} adresi bulunamadı."
     print(f"  ✓ {dest_formatted} → {dest_coords}")
     route = get_directions(get_current_location(), dest_coords)
     if not route:
-        konus("Rota bulunamadı.")
-        return
+        return "Rota bulunamadı."
     ozet = (f"Hedef {dest_formatted}. Toplam {route['total_distance']}, "
             f"yaklaşık {route['total_duration']} yürüyüş.")
     if route["steps"]:
         ilk = route["steps"][0]
         ozet += f" İlk adım: {ilk['instruction']}, {ilk['distance']}."
-    konus(ozet)
+    return ozet
+
+
+def navigasyon(hedef):
+    konus(navigasyon_metni(hedef))
+
+
+# ───────────────── GEMINI LIVE ─────────────────
+AI_MOTORU = (os.getenv("AI_MOTORU") or "live").strip().lower()
+canli = None   # main() içinde kamera açıldıktan sonra kurulur
+cam = None
+
+
+def _mesafe_metni(m):
+    return "2 metre içinde engel yok" if m is None else f"{m:.1f} metre".replace(".", ",")
+
+
+def arac_mesafe_olc():
+    if guvenlik_sistemi.sensor_thread.arizali:
+        return {"sonuc": "Mesafe sensörü şu an çalışmıyor, mesafe bilinmiyor."}
+    return {"tam_on": _mesafe_metni(guvenlik_sistemi.son_mesafe)}
+
+
+def arac_ayar_degistir(duzey):
+    if duzey not in (DUZEY_KISA, DUZEY_DETAYLI, DUZEY_SESSIZ):
+        return {"hata": "duzey kisa, detayli ya da sessiz olmalı"}
+    ayarlar["konusma_duzeyi"] = duzey
+    ayarlari_kaydet()
+    print(f"⚙️  Konuşma düzeyi: {duzey}")
+    return {"sonuc": f"Konuşma düzeyi {duzey} olarak ayarlandı."}
+
+
+def arac_durum_bildir():
+    return {"internet": "var" if internet_var() else "yok",
+            "mesafe_sensoru": "çalışmıyor" if guvenlik_sistemi.sensor_thread.arizali else "çalışıyor",
+            "konusma_duzeyi": ayarlar.get("konusma_duzeyi")}
+
+
+def arac_navigasyon_baslat(hedef):
+    return {"sonuc": navigasyon_metni(hedef)}
+
+
+def kare_jpeg():
+    if cam is None:
+        return None
+    _, b64 = kare_al(cam)
+    return None if b64 is None else base64.b64decode(b64)
+
+
+def son_ses_ayarla(yol):
+    global son_ses
+    son_ses = yol
+
+
+def canli_kur():
+    """AI_MOTORU=live ise Gemini Live'ı başlatır. Kurulamazsa eski yol kullanılır."""
+    global canli
+    if AI_MOTORU != "live":
+        print("🤖 Yapay zekâ: REST (AI_MOTORU=rest)")
+        return
+    try:
+        import canli as canli_modulu
+        canli = canli_modulu.CanliAsistan(
+            api_key=API_KEY, ses=ses_yoneticisi,
+            araclar={"mesafe_olc": arac_mesafe_olc, "ayar_degistir": arac_ayar_degistir,
+                     "durum_bildir": arac_durum_bildir, "navigasyon_baslat": arac_navigasyon_baslat},
+            kare_al=kare_jpeg, duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA),
+            son_ses_ayarla=son_ses_ayarla).baslat()
+        print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}), bağlı değilken REST")
+    except Exception as e:
+        print(f"⚠️  Gemini Live başlatılamadı, REST kullanılıyor: {type(e).__name__}: {e}")
+        canli = None
+
+
+def canli_hazir():
+    return canli is not None and canli.hazir and internet_var()
 
 
 # ───────────────── DÜĞME OLAYLARI ─────────────────
@@ -833,14 +920,23 @@ def olay_geldi(olay):
         if konusmayi_kes():
             print("\n🤫 Susturuldu")
             return
+        if canli_hazir() and canli.onumde_ne_var(guvenlik_sistemi.son_mesafe):
+            return
         olay_kuyrugu.put((kontrol.KISA, None))
     elif olay == kontrol.UZUN_BASLADI:
         konusmayi_kes()
         threading.Thread(target=ses_yoneticisi.normal_cal,
                          args=(guvenlik.ses_yolu("ton_dinliyor"),), daemon=True).start()
-        recorder.start()
+        onkayit = recorder.start()
+        if onkayit is not None and canli_hazir() and canli.dinlemeye_basla(onkayit, guvenlik_sistemi.son_mesafe):
+            recorder.dinleyici = canli.ses_parcasi
     elif olay == kontrol.UZUN_BITTI:
+        canli_dinledi = recorder.dinleyici is not None
+        recorder.dinleyici = None
         yol = recorder.stop()
+        # Ses Live'a canlı aktıysa cevabı Live verir. Bağlantı bu arada koptuysa eski yol.
+        if canli_dinledi and canli.dinlemeyi_bitir():
+            return
         if yol:
             # Bir sonraki kayıt üzerine yazmasın diye kopyala
             kopya = f"/tmp/soru_{time.time():.0f}.wav"
@@ -871,7 +967,9 @@ def keyboard_loop():
 # ───────────────── MAIN ─────────────────
 def main():
     print("SYSTEM STARTING...")
+    global cam
     cam = Camera().start()
+    canli_kur()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
     dugme.baslat()
     if setup_raw_terminal():
