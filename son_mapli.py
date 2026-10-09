@@ -68,6 +68,7 @@ import sounddevice as sd
 import torch
 from PIL import Image
 from queue import Queue
+from collections import deque
 from picamera2 import Picamera2
 from transformers import pipeline
 from dotenv import load_dotenv
@@ -87,6 +88,8 @@ if not API_KEY:
 # Maps anahtarı isteğe bağlı: yoksa program çalışır, sadece navigasyon kapalı olur
 if not GOOGLE_MAPS_API_KEY:
     print("⚠️  GOOGLE_MAPS_API_KEY boş — navigasyon kapalı, diğer her şey çalışır.")
+# Google anahtarı reddederse (REQUEST_DENIED) oturum boyunca navigasyon kapatılır
+maps_key_rejected = False
 
 # Not: 2.5-flash-lite multimodal'dır. Eğer ses inputuyla hata verirse
 # "gemini-2.5-flash" olarak değiştir.
@@ -191,7 +194,16 @@ class Camera:
 
 # ───────────────── VOICE RECORDER ─────────────────
 class VoiceRecorder:
-    """Push-to-talk: start() kayda başlar, stop() durdurup WAV kaydeder."""
+    """
+    Push-to-talk: start() kayda başlar, stop() durdurup WAV kaydeder.
+
+    Mikrofon akışı sürekli açık kalır ve son PREROLL_S saniye hafızada tutulur.
+    Akışı SPACE'e basınca açmak 150-350 ms sürüyordu, Bluetooth gecikmesiyle
+    birlikte "ev modu" gibi kısa komutların başı kayboluyordu. Artık kayıt,
+    SPACE'e basılmadan hemen önceki sesi de içeriyor.
+    """
+
+    PREROLL_S = 0.6
 
     def __init__(self, samplerate=16000, channels=1):
         self.samplerate = samplerate
@@ -200,44 +212,63 @@ class VoiceRecorder:
         self.recording = False
         self.stream = None
         self.lock = threading.Lock()
+        self._preroll = deque()
+        self._preroll_len = 0
 
     def _callback(self, indata, frame_count, time_info, status):
+        block = indata.copy()
         if self.recording:
-            self.frames.append(indata.copy())
+            self.frames.append(block)
+        else:
+            self._preroll.append(block)
+            self._preroll_len += len(block)
+            limit = int(self.samplerate * self.PREROLL_S)
+            while self._preroll and self._preroll_len - len(self._preroll[0]) >= limit:
+                self._preroll_len -= len(self._preroll.popleft())
+
+    def open(self):
+        """Mikrofon akışını açar (açıksa dokunmaz). Başarılıysa True."""
+        if self.stream is not None and self.stream.active:
+            return True
+        if self.stream is not None:  # kulaklık koptuysa akış ölmüş olabilir
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        try:
+            self._preroll.clear()
+            self._preroll_len = 0
+            self.stream = sd.InputStream(
+                samplerate=self.samplerate,
+                channels=self.channels,
+                dtype='int16',
+                callback=self._callback,
+            )
+            self.stream.start()
+            return True
+        except Exception as e:
+            print(f"❌ Mikrofon açılamadı: {e}")
+            self.stream = None
+            return False
 
     def start(self):
         with self.lock:
             if self.recording:
                 return
-            self.frames = []
+            if not self.open():
+                return
+            self.frames = list(self._preroll)  # SPACE'ten önceki 0,6 sn
+            self._preroll.clear()
+            self._preroll_len = 0
             self.recording = True
-            try:
-                self.stream = sd.InputStream(
-                    samplerate=self.samplerate,
-                    channels=self.channels,
-                    dtype='int16',
-                    callback=self._callback,
-                )
-                self.stream.start()
-                print("\n🎙️  Kayıt başladı (SPACE'e tekrar bas → AI'ya gönder)...")
-            except Exception as e:
-                print(f"❌ Kayıt başlatılamadı: {e}")
-                self.recording = False
-                self.stream = None
-
+            print("\n🎙️  Kayıt başladı (SPACE'e tekrar bas → AI'ya gönder)...")
 
     def stop(self, path="/tmp/prompt.wav"):
         with self.lock:
             if not self.recording:
                 return None
-            self.recording = False
-            if self.stream:
-                try:
-                    self.stream.stop()
-                    self.stream.close()
-                except Exception:
-                    pass
-                self.stream = None
+            self.recording = False  # akış açık kalır, ön kayıt tamponu dolmaya devam eder
 
             if not self.frames:
                 print("⚠️  Boş kayıt")
@@ -246,7 +277,7 @@ class VoiceRecorder:
             audio = np.concatenate(self.frames, axis=0)
             dur = len(audio) / self.samplerate
 
-            if dur < 0.3:
+            if dur < 0.3 + self.PREROLL_S:
                 print(f"⚠️  Çok kısa ({dur:.1f}s), atlanıyor")
                 return None
 
@@ -337,10 +368,16 @@ def sesli_komut_isle(path="/tmp/prompt.wav"):
     onay sesini çalar ve True döner (kayıt Gemini'ye gönderilmez).
     Komut değilse ya da model hazır değilse False döner.
     """
-    global current_mode
     komut, _ = komut_tanici.tani(path, bekle_s=5)
     if komut is None:
         return False
+    switch_mode_by_voice(komut)
+    return True
+
+
+def switch_mode_by_voice(komut):
+    """komut: sesli_komut.KOMUT_EV ya da KOMUT_SOKAK. Modu değiştirir, onay sesini çalar."""
+    global current_mode
     yeni = MODE_HOME if komut == sesli_komut.KOMUT_EV else MODE_STREET
     with mode_lock:
         current_mode = yeni
@@ -350,7 +387,6 @@ def sesli_komut_isle(path="/tmp/prompt.wav"):
     else:
         print("\n🚶 SOKAK MODU (sesli komut) — sürekli analiz")
         ses_yoneticisi.normal_cal(guvenlik.ses_yolu("sokak_modu"))
-    return True
 
 
 def keyboard_loop():
@@ -437,7 +473,10 @@ def ask_ai_home(img_b64, audio_b64):
                     "Sen görme engelli bir kullanıcıya yardım eden bir asistansın. "
                     "Kullanıcının ses kaydındaki sorusunu dinle ve görüntüye bakarak "
                     "Türkçe, kısa (en fazla 2 cümle), net ve doğrudan cevap ver. "
-                    "Selamlama, giriş cümlesi veya gereksiz açıklama yapma."
+                    "Selamlama, giriş cümlesi veya gereksiz açıklama yapma. "
+                    "Kullanıcı soru sormuyor da mod değiştirmek istiyorsa ('sokak modu', "
+                    "'dışarı çık' gibi) sadece MOD_SOKAK yaz; ('ev modu', 'eve geç' gibi) "
+                    "sadece MOD_EV yaz."
                 )},
                 {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
                 {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}}
@@ -621,7 +660,12 @@ def extract_destination_from_audio(audio_b64):
                     "Açıklama, cümle, noktalama, fazladan boşluk yok. Sadece yer ismi. "
                     "Örnekler: 'Beşiktaş çarşısına gitmek istiyorum' → 'Beşiktaş Çarşısı'. "
                     "'Taksim meydanına gidicem' → 'Taksim Meydanı'. "
-                    "'Sultanahmet camiine götür beni' → 'Sultanahmet Camii'."
+                    "'Sultanahmet camiine götür beni' → 'Sultanahmet Camii'. "
+                    "Kullanıcı yer değil mod değiştirmek istiyorsa: 'ev modu', 'eve geç', "
+                    "'içeri girdim' gibi ise sadece MOD_EV yaz; 'sokak modu', 'dışarı çık' "
+                    "gibi ise sadece MOD_SOKAK yaz. "
+                    "Kayıtta açıkça söylenmiş bir yer ismi yoksa (sessizlik, gürültü, soru) "
+                    "hiçbir yer uydurma, sadece YOK yaz."
                 )},
                 {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}}
             ]
@@ -632,6 +676,8 @@ def extract_destination_from_audio(audio_b64):
     if result:
         # Gemini bazen tırnak veya noktalama ekliyor, temizle
         result = result.strip().strip('"').strip("'").rstrip('.,!?').strip()
+        if result.upper() == "YOK":
+            return None
     return result
 
 
@@ -666,6 +712,9 @@ def geocode(query):
         data = r.json()
         if data.get("status") != "OK":
             print(f"  ❌ Geocoding: {data.get('status')} - {data.get('error_message', '')}")
+            if data.get("status") == "REQUEST_DENIED":
+                global maps_key_rejected
+                maps_key_rejected = True
             return None, None
         results = data.get("results", [])
         if not results:
@@ -726,7 +775,7 @@ def get_directions(origin, destination, mode="walking"):
 def handle_navigation_request():
     """Sesi al → hedef çıkar → geocode → directions → TTS."""
     print("\n📍 Navigasyon isteği işleniyor...")
-    if not GOOGLE_MAPS_API_KEY:
+    if not GOOGLE_MAPS_API_KEY or maps_key_rejected:
         speak_blocking("Navigasyon şu an kullanılamıyor.")
         return
     try:
@@ -741,11 +790,21 @@ def handle_navigation_request():
     if not destination:
         speak_blocking("Hedefi anlayamadım, lütfen tekrar deneyin.")
         return
+    # Vosk kaçırdıysa Gemini mod komutunu tanımış olabilir (internetli yedek)
+    if destination.upper() in ("MOD_EV", "MOD_SOKAK"):
+        print(f"  🔁 Gemini mod komutu tanıdı: {destination}")
+        switch_mode_by_voice(sesli_komut.KOMUT_EV if destination.upper() == "MOD_EV"
+                             else sesli_komut.KOMUT_SOKAK)
+        return
     print(f"  📍 Anlaşılan hedef: '{destination}'")
 
     # 2. Geocode
     dest_coords, dest_formatted = geocode(destination)
     if not dest_coords:
+        if maps_key_rejected:
+            print("  ❌ Maps anahtarı geçersiz, navigasyon bu oturumda kapatıldı")
+            speak_blocking("Navigasyon şu an kullanılamıyor.")
+            return
         speak_blocking(f"{destination} adresi bulunamadı.")
         return
     print(f"  ✓ {dest_formatted} → {dest_coords}")
@@ -802,6 +861,13 @@ def handle_home_mode(cam):
 
     print("🤖 Gemini'ye gönderiliyor (ses + görüntü)...")
     response = ask_ai_home(img_b64, audio_b64)
+
+    # Vosk kaçırdıysa Gemini mod komutunu tanımış olabilir (internetli yedek)
+    komut = (response or "").strip().strip(".'\"").upper()
+    if komut in ("MOD_EV", "MOD_SOKAK"):
+        print(f"  🔁 Gemini mod komutu tanıdı: {komut}")
+        switch_mode_by_voice(sesli_komut.KOMUT_EV if komut == "MOD_EV" else sesli_komut.KOMUT_SOKAK)
+        return
 
     if response:
         print(f"📢 {response}")
@@ -880,6 +946,7 @@ def handle_street_mode(cam, last_text):
 def main():
     print("SYSTEM STARTING...")
     cam = Camera().start()
+    recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
     threading.Thread(target=tts_worker, daemon=True).start()
 
     if setup_raw_terminal():
