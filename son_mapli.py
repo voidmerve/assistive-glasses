@@ -1,47 +1,45 @@
 """
-Asistif Gözlük - Ev Modu + Sokak Modu
-=====================================
+Asistif Gözlük
+==============
 
-KURULUM (ilk seferde):
-    sudo apt install libportaudio2
-    pip install sounddevice
-    pip install python-dotenv
+Görme engelli kullanıcı için Türkçe konuşan akıllı gözlük.
+
+TASARIM İLKELERİ:
+    - Varsayılan durum sessizlik. Kulak trafiği ve çevreyi dinlemek için lazım.
+    - Engel uyarısını sadece mesafe sensörü verir (guvenlik.py): internetsiz,
+      tık ve titreşimle, sadece çarpışmaya doğru yürürken.
+    - Yapay zekâ sadece sorulunca konuşur. Tek cümle, en önemli şey önce.
+    - Yönler saat sistemiyle söylenir: tam önü saat 12, sağ saat 2-3, sol saat 9-10.
+
+KONTROL (tek düğme, kontrol.py):
+    kısa basış → "Önümde ne var?" (konuşma sürüyorsa önce susturur)
+    uzun basış → basılı tutarken soru sor, bırakınca cevaplanır
+    çift basış → son söyleneni tekrarla
+    Düğme takılı değilken klavye: d = kısa, SPACE = uzun başlat/bitir, r = çift, q = çıkış
+
+SESLİ AYARLAR (uzun basışla söylenir, internetsiz anlaşılır):
+    "kısa konuş"    → tek cümlelik cevaplar (varsayılan)
+    "detaylı anlat" → 2-3 cümle, sol/orta/sağ mesafe tahmini ile
+    "sessiz ol"     → sadece sorunca konuşur (kendiliğinden bildirim yok)
+    "durum ne"      → internet ve sensör durumu
+    "tekrar et"     → son söyleneni tekrarlar
+    Bir yere gitmek için: "Beşiktaş çarşısına gitmek istiyorum" (Maps anahtarı gerekir)
+
+İNTERNET YOKKEN:
+    Engel uyarıları aynen çalışır. Kısa basış sensörün ölçtüğü mesafeyi söyler.
+    Sorular için "Bunun için internet gerekiyor" denir.
 
 ÇALIŞTIRMADAN ÖNCE:
     1. Bluetooth kulaklığın bağlı olduğundan emin ol.
-    2. Mikrofonu default source yap:
+    2. Mikrofon ve hoparlör varsayılan olmalı:
          pactl set-default-source bluez_input.20:23:03:25:87:1C
-       (MAC adresini kendi cihazınkiyle değiştir)
-    3. Hoparlörü default sink yap (genelde otomatik olur):
-         pactl set-default-sink bluez_output.20:23:03:25:87:1C.a2dp-sink
+         pactl set-default-sink bluez_output.20_23_03_25_87_1C.1
 
-KONTROLLER (SSH üzerinden, Enter'a gerek yok — tek tuş):
-    h     → EV MODU         (SPACE = sesli soru sor)
-    s     → SOKAK MODU      (sürekli analiz + SPACE = navigasyon)
-    q     → çıkış
-
-SESLİ MOD DEĞİŞİMİ (internetsiz, vosk):
-    SPACE bas → "ev modu" / "eve geç" ya da "sokak modu" / "dışarı çık" → SPACE bas.
-    Kayıt önce yerelde yazıya çevrilir. Mod komutuysa mod değişir ve Gemini'ye
-    gönderilmez. Komut değilse eskisi gibi Gemini'ye gider. h/s tuşları yedektir.
-
-EV MODU:
-    SPACE bas → konuş → SPACE bas → görüntü + ses Gemini'ye gider, cevap TTS.
-
-SOKAK MODU:
-    Arka planda sürekli engel/yön bildirimi yapar.
-    SPACE bas → "Beşiktaş çarşısına gitmek istiyorum" → SPACE bas →
-    Gemini hedefi çıkarır, Google Maps'ten rota alınır, TTS ile söylenir.
-
-API KEY'LERİ:
-    Anahtarlar kodda değil, bu dosyayla aynı klasördeki .env dosyasında durur:
-        GEMINI_API_KEY=...        # Gemini key
-        GOOGLE_MAPS_API_KEY=...   # Maps key
-    İlk kurulumda .env.example dosyasını .env adıyla kopyalayıp değerleri doldur.
-    Yeni key alınca sadece .env dosyasını değiştir, koda dokunmaya gerek yok.
-    .env dosyası .gitignore'dadır, git'e gönderilmez.
-    Gemini anahtarı eksikse program hata mesajı verip durur.
-    Maps anahtarı boş bırakılabilir, o zaman sadece navigasyon kapalı olur.
+API KEY'LERİ (.env):
+    GEMINI_API_KEY=...        # zorunlu
+    GOOGLE_MAPS_API_KEY=...   # isteğe bağlı, boşsa navigasyon kapalı
+    DUGME_PIN=                # fiziksel düğmenin GPIO (BCM) numarası, boşsa klavye
+    .env dosyası git'e gönderilmez.
 """
 
 import warnings
@@ -51,21 +49,20 @@ import os
 import re
 import sys
 import cv2
+import json
 import time
-import tty
 import wave
 import select
 import atexit
 import base64
+import shutil
 import termios
 import requests
 import threading
 import asyncio
 import edge_tts
-import subprocess
 import numpy as np
 import sounddevice as sd
-import torch
 from PIL import Image
 from queue import Queue
 from collections import deque
@@ -73,6 +70,7 @@ from picamera2 import Picamera2
 from transformers import pipeline
 from dotenv import load_dotenv
 import guvenlik
+import kontrol
 import sesli_komut
 
 # ───────────────── CONFIG ─────────────────
@@ -99,7 +97,6 @@ MODEL_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAM
 GEMINI_HEADERS = {"x-goog-api-key": API_KEY}
 
 HTTP_TIMEOUT = 25
-RATE_LIMIT_DELAY = 2
 DEPTH_CALIBRATION = 1.0
 
 # ───────────────── MAPS CONFIG ─────────────────
@@ -109,27 +106,41 @@ DEPTH_CALIBRATION = 1.0
 # Format: (lat, lng) — Denizli'de sabit test konumu
 CURRENT_LOCATION = (37.73831482466314, 29.10723965422727)
 
-# ───────────────── MOD STATE ─────────────────
-MODE_HOME = "home"
-MODE_STREET = "street"
-current_mode = MODE_STREET  # başlangıç
-mode_lock = threading.Lock()
+# ───────────────── AYARLAR (konuşma düzeyi) ─────────────────
+AYAR_DOSYASI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ayarlar.json")
+DUZEY_KISA = sesli_komut.KOMUT_KISA
+DUZEY_DETAYLI = sesli_komut.KOMUT_DETAYLI
+DUZEY_SESSIZ = sesli_komut.KOMUT_SESSIZ
 
-# ───────────────── TTS QUEUE ─────────────────
-tts_queue = Queue(maxsize=1)
-tts_busy = threading.Event()
+
+def ayarlari_yukle():
+    try:
+        with open(AYAR_DOSYASI) as f:
+            return json.load(f)
+    except Exception:
+        return {"konusma_duzeyi": DUZEY_KISA}
+
+
+def ayarlari_kaydet():
+    try:
+        with open(AYAR_DOSYASI, "w") as f:
+            json.dump(ayarlar, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️  Ayarlar kaydedilemedi: {e}")
+
+
+ayarlar = ayarlari_yukle()
 
 # ───────────────── GÜVENLİK KATMANI ─────────────────
 # Mesafe sensörü + engel uyarıları + internet izleyici. İnternetten ve yapay
 # zekâdan bağımsız kendi thread'lerinde çalışır. Derinlik modeli yüklenmeden
 # önce başlatılır ki yükleme sırasında da uyarılar çalışsın.
-# Sensör seçimi .env içindeki SENSOR_MODU ile yapılır (simulasyon / gercek).
-# Tüm sesler (TTS dahil) bu ses yöneticisinden geçer: engel uyarıları acil
-# önceliklidir ve o an çalan normal konuşmayı keser.
+# Tüm sesler (TTS dahil) bu ses yöneticisinden geçer: "Dur" uyarısı acil
+# önceliklidir ve o an çalan konuşmayı keser. Tıklar konuşmanın üstüne karışır.
 ses_yoneticisi = guvenlik.SesYoneticisi()
 guvenlik_sistemi = guvenlik.GuvenlikSistemi(ses=ses_yoneticisi).baslat()
 
-# Sesli mod komutları için Türkçe vosk modeli, açılışı geciktirmemek için arka planda yüklenir
+# Sesli ayar komutları için Türkçe vosk modeli, açılışı geciktirmemek için arka planda yüklenir
 komut_tanici = sesli_komut.KomutTanici().yukle_arkaplanda()
 
 # ───────────────── DEPTH MODEL ─────────────────
@@ -292,11 +303,11 @@ class VoiceRecorder:
 
 
 recorder = VoiceRecorder()
-voice_ready = threading.Event()         # ev modu için
-street_voice_ready = threading.Event()  # sokak modu (navigasyon) için
+olay_kuyrugu = Queue()   # düğme olayları → ana döngü
+SORU = "soru"            # (SORU, wav_yolu) olayı: uzun basış bitti, kayıt hazır
 
 
-# ───────────────── KEYBOARD (SSH/terminal) ─────────────────
+# ───────────────── TERMİNAL (SSH, klavye yedeği) ─────────────────
 # stdin'i cbreak moduna alıp Enter beklemeden tek tuş yakalıyoruz.
 # VS Code SSH terminal'inde sorunsuz çalışır.
 
@@ -323,84 +334,6 @@ def setup_raw_terminal():
 def restore_terminal():
     if _old_term_settings is not None:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term_settings)
-
-
-def handle_key(key):
-    global current_mode
-    if key == 'h':
-        with mode_lock:
-            if current_mode != MODE_HOME:
-                current_mode = MODE_HOME
-                print("\n🏠 EV MODU — SPACE: kayıt başlat/durdur")
-    elif key == 's':
-        with mode_lock:
-            if current_mode != MODE_STREET:
-                current_mode = MODE_STREET
-                print("\n🚶 SOKAK MODU — sürekli analiz")
-    elif key == 'q':
-        print("\nÇıkılıyor...")
-        guvenlik_sistemi.durdur()
-        restore_terminal()
-        os._exit(0)
-    elif key == ' ':
-        with mode_lock:
-            mode = current_mode
-        if mode == MODE_HOME:
-            if not recorder.recording:
-                recorder.start()
-            else:
-                path = recorder.stop()
-                if path:
-                    voice_ready.set()
-        elif mode == MODE_STREET:
-            if not recorder.recording:
-                print("\n🗺️  Navigasyon — hedefi söyleyin (SPACE'e tekrar bas → işle)")
-                recorder.start()
-            else:
-                path = recorder.stop()
-                if path:
-                    street_voice_ready.set()
-
-
-def sesli_komut_isle(path="/tmp/prompt.wav"):
-    """
-    Kaydı internetsiz olarak yazıya çevirir. Mod komutuysa modu değiştirir,
-    onay sesini çalar ve True döner (kayıt Gemini'ye gönderilmez).
-    Komut değilse ya da model hazır değilse False döner.
-    """
-    komut, _ = komut_tanici.tani(path, bekle_s=5)
-    if komut is None:
-        return False
-    switch_mode_by_voice(komut)
-    return True
-
-
-def switch_mode_by_voice(komut):
-    """komut: sesli_komut.KOMUT_EV ya da KOMUT_SOKAK. Modu değiştirir, onay sesini çalar."""
-    global current_mode
-    yeni = MODE_HOME if komut == sesli_komut.KOMUT_EV else MODE_STREET
-    with mode_lock:
-        current_mode = yeni
-    if yeni == MODE_HOME:
-        print("\n🏠 EV MODU (sesli komut) — SPACE: kayıt başlat/durdur")
-        ses_yoneticisi.normal_cal(guvenlik.ses_yolu("ev_modu"))
-    else:
-        print("\n🚶 SOKAK MODU (sesli komut) — sürekli analiz")
-        ses_yoneticisi.normal_cal(guvenlik.ses_yolu("sokak_modu"))
-
-
-def keyboard_loop():
-    """stdin'den tek tuş okuyup handle_key'e veren daemon döngü."""
-    while True:
-        try:
-            r, _, _ = select.select([sys.stdin], [], [], 0.2)
-            if r:
-                key = sys.stdin.read(1)
-                if key:
-                    handle_key(key)
-        except Exception as e:
-            print(f"keyboard error: {e}")
-            time.sleep(0.5)
 
 
 # ───────────────── DEPTH ESTIMATION ─────────────────
@@ -443,50 +376,7 @@ def estimate_depth(frame_rgb):
         return None
 
 
-# ───────────────── GEMINI: SOKAK (sadece görüntü) ─────────────────
-def ask_ai_street(img_b64):
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": (
-                    "Görüntüde gördüğün en fazla 3 nesneyi yön bilgisiyle birlikte tek cümlede Türkçe söyle. "
-                    "Format: 'Önünde X var, sağında Y, solunda Z.' "
-                    "Eğer 2 nesne varsa: 'Önünde X var, sağında Y.' "
-                    "Eğer 1 nesne varsa: 'Önünde X var.' "
-                    "Yön: nesne ortadaysa 'önünde', sağda 'sağında', solda 'solunda'. "
-                    "Sadece bu format, başka hiçbir şey yazma."
-                )},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-            ]
-        }],
-        "generationConfig": {"maxOutputTokens": 60, "temperature": 0.1},
-    }
-    return _gemini_post(payload, label="SOKAK")
-
-
-# ───────────────── GEMINI: EV (görüntü + ses) ─────────────────
-def ask_ai_home(img_b64, audio_b64):
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": (
-                    "Sen görme engelli bir kullanıcıya yardım eden bir asistansın. "
-                    "Kullanıcının ses kaydındaki sorusunu dinle ve görüntüye bakarak "
-                    "Türkçe, kısa (en fazla 2 cümle), net ve doğrudan cevap ver. "
-                    "Selamlama, giriş cümlesi veya gereksiz açıklama yapma. "
-                    "Kullanıcı soru sormuyor da mod değiştirmek istiyorsa ('sokak modu', "
-                    "'dışarı çık' gibi) sadece MOD_SOKAK yaz; ('ev modu', 'eve geç' gibi) "
-                    "sadece MOD_EV yaz."
-                )},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-                {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}}
-            ]
-        }],
-        "generationConfig": {"maxOutputTokens": 150, "temperature": 0.3},
-    }
-    return _gemini_post(payload, label="EV")
-
-
+# ───────────────── GEMINI İSTEĞİ ─────────────────
 _rate_limit_cooldown_until = 0.0  # epoch — bu zamandan önce API çağrısı atlanır
 
 
@@ -524,7 +414,7 @@ def _gemini_post(payload, label="", max_retries=2):
                 print(f"  ❌ 429 RATE LIMIT — 30s cool-down başladı")
                 print(f"     Free tier: ~15 req/dakika. Çözümler:")
                 print(f"     • Billing'i aç (~$200 ücretsiz kredi)")
-                print(f"     • RATE_LIMIT_DELAY artır (sokak modu döngüsü yavaşlasın)")
+                print(f"     • Daha seyrek soru sor")
                 return None
 
             # 5xx = geçici sunucu hatası. Kısa backoff'la retry.
@@ -555,130 +445,251 @@ def _gemini_post(payload, label="", max_retries=2):
     return None
 
 
-# ───────────────── PARALEL İŞLEM (sokak modu) ─────────────────
-def parallel_process(frame_rgb, img_b64):
-    results = {"ai": None, "depth": None}
-
-    def run_ai():
-        results["ai"] = ask_ai_street(img_b64)
-
-    def run_depth():
-        results["depth"] = estimate_depth(frame_rgb)
-
-    t1 = threading.Thread(target=run_ai)
-    t2 = threading.Thread(target=run_depth)
-    t1.start(); t2.start()
-    t1.join(); t2.join()
-    return results["ai"], results["depth"]
+# ───────────────── KONUŞMA ─────────────────
+# Her konuşmanın bir "nesli" var. Kısa basışla susturulunca nesil artar ve
+# henüz sentezlenmekte olan cümle de çalınmadan atılır.
+_konusma_nesli = 0
+_konusma_kilidi = threading.Lock()
+SON_KONUSMA = "/tmp/son_konusma.mp3"
+son_ses = None  # çift basışta tekrarlanacak dosya
 
 
-def combine_results(ai_text, depth_info):
-    if not ai_text:
-        return None
-    spoken = ai_text.replace('"', '').replace("'", "").strip()
-    if not depth_info:
-        return spoken
-
-    direction_map = {
-        "önünde": depth_info["center"],
-        "sağında": depth_info["right"],
-        "solunda": depth_info["left"],
-    }
-
-    parts = [p.strip() for p in spoken.split(",")]
-    new_parts = []
-    for part in parts:
-        pl = part.lower()
-        added = False
-        for direction, dist in direction_map.items():
-            if direction in pl and dist is not None:
-                idx = pl.find(direction)
-                rest = part[idx:]
-                if rest:
-                    rest = rest[0].lower() + rest[1:]
-                rest = rest.rstrip(".")
-                dist_str = f"{dist:.1f}".replace(".", ",")  # TTS için Türkçe ondalık
-                new_parts.append(f"{dist_str} metre {rest}")
-                added = True
-                break
-        if not added:
-            new_parts.append(part.rstrip("."))
-    return ", ".join(new_parts)
+def konusmayi_kes():
+    """Kısa basış: o an çalan ya da hazırlanan konuşmayı susturur. Bir şey kesildiyse True."""
+    global _konusma_nesli
+    with _konusma_kilidi:
+        hazirlaniyor = _konusma_hazirlaniyor.is_set()
+        _konusma_nesli += 1
+    kesildi = ses_yoneticisi.normal_kes()
+    return kesildi or hazirlaniyor
 
 
-# ───────────────── TTS ─────────────────
-async def speak(text):
-    try:
-        communicate = edge_tts.Communicate(text, "tr-TR-EmelNeural")
-        f = "/tmp/tts.mp3"
-        await communicate.save(f)
-        # Normal öncelik: engel uyarısı gelirse bu konuşma kesilir
-        if not ses_yoneticisi.normal_cal(f):
-            print("🔇 Konuşma acil uyarı nedeniyle kesildi veya çalınamadı")
-    except Exception as e:
-        print("TTS ERROR:", e)
+_konusma_hazirlaniyor = threading.Event()
 
 
-def tts_worker():
-    while True:
-        text = tts_queue.get()
-        if not text:
-            continue
-        tts_busy.set()
-        try:
-            asyncio.run(speak(text))
-        finally:
-            tts_busy.clear()
+def oynat(yol):
+    """Önceden kaydedilmiş bir sesi çalar (internetsiz) ve tekrar için hatırlar."""
+    global son_ses
+    son_ses = yol
+    ses_yoneticisi.normal_cal(yol)
 
 
-def speak_blocking(text):
-    """TTS söyle ve bitene kadar bekle (handler'lar için yardımcı)."""
+def konus(text):
+    """Metni edge-tts ile seslendirir (internet gerekir), bitene ya da kesilene kadar bekler."""
+    global son_ses
     print(f"📢 {text}")
-    tts_queue.put(text)
-    t_start = time.time()
-    while not tts_busy.is_set() and time.time() - t_start < 3:
-        time.sleep(0.05)
-    while tts_busy.is_set():
-        time.sleep(0.2)
+    with _konusma_kilidi:
+        nesil = _konusma_nesli
+    _konusma_hazirlaniyor.set()
+    try:
+        f = "/tmp/tts.mp3"
+        asyncio.run(edge_tts.Communicate(text, "tr-TR-EmelNeural").save(f))
+    except Exception as e:
+        print(f"TTS ERROR: {type(e).__name__}: {e}")
+        return
+    finally:
+        _konusma_hazirlaniyor.clear()
+    if nesil != _konusma_nesli:
+        print("🔇 Susturuldu")
+        return
+    shutil.copyfile(f, SON_KONUSMA)
+    son_ses = SON_KONUSMA
+    if not ses_yoneticisi.normal_cal(f):
+        print("🔇 Konuşma kesildi")
 
 
-# ───────────────── MAPS / NAVİGASYON ─────────────────
+def internet_var():
+    # İzleyici henüz ilk kontrolü yapmadıysa (None) var sayıp denenir
+    return guvenlik_sistemi.internet_var is not False
 
+
+# ───────────────── GEMINI İSTEMLERİ ─────────────────
+YON_KURALI = (
+    "Yönleri saat sistemiyle söyle: görüntünün ortası saat 12, sol kenarı saat 10, "
+    "sağ kenarı saat 2. Örnek: 'Saat 1 yönünde kapı.' "
+)
+
+
+def _duzey_kurali():
+    if ayarlar.get("konusma_duzeyi") == DUZEY_DETAYLI:
+        return "En fazla 3 kısa cümle kullan. "
+    return "Tek cümle, en fazla 12 kelime. "
+
+
+def _mesafe_bilgisi(sensor_m, derinlik):
+    parcalar = []
+    if sensor_m is not None:
+        parcalar.append(
+            f"Lazer sensör tam öndeki (saat 12) nesneye {sensor_m:.1f} metre ölçtü, bu kesin bilgidir. ")
+    else:
+        parcalar.append("Lazer sensör tam önde 2 metre içinde bir şey ölçmedi. ")
+    if derinlik:
+        parcalar.append(
+            f"Kamera derinlik tahmini (yaklaşık): sol {derinlik['left']:.1f} m, "
+            f"orta {derinlik['center']:.1f} m, sağ {derinlik['right']:.1f} m. ")
+    parcalar.append("Bunlar dışında mesafe uydurma. Mesafe söylerken ondalığı virgülle yaz (1,5 metre). ")
+    return "".join(parcalar)
+
+
+def istem_tarif(sensor_m, derinlik):
+    return (
+        "Sen görme engelli bir kullanıcının gözlüğüsün. Kullanıcı 'önümde ne var' diye sordu. "
+        "Türkçe cevap ver. " + _duzey_kurali() +
+        "En önemli şeyi önce söyle: yoldaki engel, basamak, kapı, insan, araç. "
+        "Önemsiz eşyaları sayma. " + YON_KURALI + _mesafe_bilgisi(sensor_m, derinlik) +
+        "Görüntü karanlık, bulanık ya da kapalıysa sadece bunu söyle. "
+        "Selamlama ve giriş cümlesi yok."
+    )
+
+
+def istem_soru(sensor_m):
+    return (
+        "Sen görme engelli bir kullanıcının gözlüğüsün. Ses kaydında kullanıcının sorusu, "
+        "görüntüde önündeki sahne var. Türkçe, net ve doğrudan cevap ver. " + _duzey_kurali() +
+        YON_KURALI + _mesafe_bilgisi(sensor_m, None) +
+        "Yazı, etiket, ilaç kutusu ya da para soruluyorsa okuyup söyle. "
+        "Selamlama ve giriş cümlesi yok.\n"
+        "Özel durumlar, bunlarda SADECE belirtilen kelimeyi yaz:\n"
+        "- Kullanıcı bir yere gitmek istiyorsa: NAVIGASYON: <yer adı>\n"
+        "- Kısa konuşmamı istiyorsa: AYAR_KISA\n"
+        "- Detaylı anlatmamı istiyorsa: AYAR_DETAYLI\n"
+        "- Sessiz olmamı / sadece sorunca konuşmamı istiyorsa: AYAR_SESSIZ\n"
+        "- Cihazın durumunu soruyorsa: DURUM\n"
+        "- Son söylediğimi tekrar istiyorsa: TEKRAR\n"
+        "- Kayıt boş, gürültü ya da anlaşılmıyorsa: ANLASILMADI"
+    )
+
+
+def kare_al(cam, boyut=(480, 360), kalite=60):
+    frame = cam.get()
+    if frame is None:
+        return None, None
+    small = cv2.resize(frame, boyut)
+    _, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, kalite])
+    return frame, base64.b64encode(buf).decode("utf-8")
+
+
+# ───────────────── SENSÖRE DAYALI İNTERNETSİZ CEVAP ─────────────────
+def sensorle_cevapla():
+    """İnternet ya da yapay zekâ yokken: sadece lazer sensörün ölçtüğünü söyler."""
+    m = guvenlik_sistemi.son_mesafe
+    if m is None:
+        ad = "engel_yok"
+    elif m < 0.75:
+        ad = "engel_yarim"
+    elif m < 1.25:
+        ad = "engel_bir"
+    elif m < 1.75:
+        ad = "engel_bir_bucuk"
+    else:
+        ad = "engel_iki"
+    print(f"📏 Sensörle cevap: {'menzil dışı' if m is None else f'{m:.2f} m'}")
+    oynat(guvenlik.ses_yolu(ad))
+
+
+# ───────────────── KISA BASIŞ: ÖNÜMDE NE VAR ─────────────────
+def onumde_ne_var(cam):
+    if not internet_var():
+        sensorle_cevapla()
+        return
+    frame, img_b64 = kare_al(cam)
+    if frame is None:
+        print("⚠️ Görüntü yok")
+        sensorle_cevapla()
+        return
+    sensor_m = guvenlik_sistemi.son_mesafe
+    # Derinlik tahmini ~5 sn sürüyor, sadece detaylı düzeyde
+    derinlik = estimate_depth(frame) if ayarlar.get("konusma_duzeyi") == DUZEY_DETAYLI else None
+    payload = {
+        "contents": [{"parts": [
+            {"text": istem_tarif(sensor_m, derinlik)},
+            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+        ]}],
+        "generationConfig": {"maxOutputTokens": 120, "temperature": 0.2},
+    }
+    cevap = _gemini_post(payload, label="TARİF")
+    if not cevap:
+        print("⚠️ Yapay zekâdan cevap yok, sensörle cevaplanıyor")
+        sensorle_cevapla()
+        return
+    konus(cevap.replace('"', "").strip())
+
+
+# ───────────────── UZUN BASIŞ: SORU ─────────────────
+def ayari_uygula(komut):
+    """Sesli ayar komutunu uygular (internetsiz)."""
+    if komut in (DUZEY_KISA, DUZEY_DETAYLI, DUZEY_SESSIZ):
+        ayarlar["konusma_duzeyi"] = komut
+        ayarlari_kaydet()
+        print(f"⚙️  Konuşma düzeyi: {komut}")
+        oynat(guvenlik.ses_yolu(f"duzey_{komut}"))
+    elif komut == sesli_komut.KOMUT_DURUM:
+        guvenlik_sistemi.durum_soyle()
+    elif komut == sesli_komut.KOMUT_TEKRAR:
+        tekrarla()
+
+
+GEMINI_KOMUTLARI = {
+    "AYAR_KISA": DUZEY_KISA,
+    "AYAR_DETAYLI": DUZEY_DETAYLI,
+    "AYAR_SESSIZ": DUZEY_SESSIZ,
+    "DURUM": sesli_komut.KOMUT_DURUM,
+    "TEKRAR": sesli_komut.KOMUT_TEKRAR,
+}
+
+
+def soruyu_isle(cam, wav_yolu):
+    # 1. Önce internetsiz: ayar komutu mu?
+    komut, _ = komut_tanici.tani(wav_yolu, bekle_s=5)
+    if komut is not None:
+        ayari_uygula(komut)
+        return
+
+    # 2. Soru: yapay zekâ gerekir
+    if not internet_var():
+        oynat(guvenlik.ses_yolu("internet_gerekli"))
+        return
+    _, img_b64 = kare_al(cam)
+    with open(wav_yolu, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+    parts = [{"text": istem_soru(guvenlik_sistemi.son_mesafe)}]
+    if img_b64:
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+    parts.append({"inline_data": {"mime_type": "audio/wav", "data": audio_b64}})
+    cevap = _gemini_post({"contents": [{"parts": parts}],
+                          "generationConfig": {"maxOutputTokens": 200, "temperature": 0.3}},
+                         label="SORU")
+    if not cevap:
+        oynat(guvenlik.ses_yolu("ai_yok"))
+        return
+
+    # 3. Gemini özel bir durum mu bildirdi?
+    temiz = cevap.strip().strip(".'\"").strip()
+    ust = temiz.upper()
+    if ust in GEMINI_KOMUTLARI:
+        print(f"  🔁 Gemini komut tanıdı: {ust}")
+        ayari_uygula(GEMINI_KOMUTLARI[ust])
+    elif ust.startswith("ANLASILMADI") or ust.startswith("ANLAŞILMADI"):
+        oynat(guvenlik.ses_yolu("anlamadim"))
+    elif ust.startswith("NAVIGASYON"):
+        navigasyon(temiz.split(":", 1)[1].strip() if ":" in temiz else "")
+    else:
+        konus(temiz)
+
+
+# ───────────────── ÇİFT BASIŞ: TEKRAR ─────────────────
+def tekrarla():
+    if son_ses and os.path.exists(son_ses):
+        print("🔁 Tekrar")
+        ses_yoneticisi.normal_cal(son_ses)
+    else:
+        ses_yoneticisi.normal_cal(guvenlik.ses_yolu("tekrar_yok"))
+
+
+# ───────────────── MAPS ─────────────────
 def get_current_location():
     """Mevcut konumu döner. TODO: telefon GPS entegre edilecek."""
     return CURRENT_LOCATION
-
-
-def extract_destination_from_audio(audio_b64):
-    """Gemini'ye ses gönderir, sadece hedef yer ismini geri alır."""
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": (
-                    "Bu ses kaydında kullanıcı bir yere gitmek istediğini söylüyor. "
-                    "Sadece gidilmek istenen yerin ismini yaz, başka hiçbir şey yazma. "
-                    "Açıklama, cümle, noktalama, fazladan boşluk yok. Sadece yer ismi. "
-                    "Örnekler: 'Beşiktaş çarşısına gitmek istiyorum' → 'Beşiktaş Çarşısı'. "
-                    "'Taksim meydanına gidicem' → 'Taksim Meydanı'. "
-                    "'Sultanahmet camiine götür beni' → 'Sultanahmet Camii'. "
-                    "Kullanıcı yer değil mod değiştirmek istiyorsa: 'ev modu', 'eve geç', "
-                    "'içeri girdim' gibi ise sadece MOD_EV yaz; 'sokak modu', 'dışarı çık' "
-                    "gibi ise sadece MOD_SOKAK yaz. "
-                    "Kayıtta açıkça söylenmiş bir yer ismi yoksa (sessizlik, gürültü, soru) "
-                    "hiçbir yer uydurma, sadece YOK yaz."
-                )},
-                {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}}
-            ]
-        }],
-        "generationConfig": {"maxOutputTokens": 50, "temperature": 0.0},
-    }
-    result = _gemini_post(payload, label="HEDEF")
-    if result:
-        # Gemini bazen tırnak veya noktalama ekliyor, temizle
-        result = result.strip().strip('"').strip("'").rstrip('.,!?').strip()
-        if result.upper() == "YOK":
-            return None
-    return result
 
 
 def _strip_html(text):
@@ -772,174 +783,89 @@ def get_directions(origin, destination, mode="walking"):
         return None
 
 
-def handle_navigation_request():
-    """Sesi al → hedef çıkar → geocode → directions → TTS."""
-    print("\n📍 Navigasyon isteği işleniyor...")
+def navigasyon(hedef):
+    """Gemini'nin anladığı hedef → geocode → yürüyüş rotası → ilk adım."""
+    print(f"\n📍 Navigasyon: '{hedef}'")
     if not GOOGLE_MAPS_API_KEY or maps_key_rejected:
-        speak_blocking("Navigasyon şu an kullanılamıyor.")
+        konus("Navigasyon şu an kullanılamıyor.")
         return
-    try:
-        with open("/tmp/prompt.wav", "rb") as f:
-            audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-    except FileNotFoundError:
-        print("⚠️ Ses dosyası yok")
+    if not hedef:
+        konus("Nereye gitmek istediğini anlayamadım.")
         return
-
-    # 1. Hedefi sesten çıkar
-    destination = extract_destination_from_audio(audio_b64)
-    if not destination:
-        speak_blocking("Hedefi anlayamadım, lütfen tekrar deneyin.")
-        return
-    # Vosk kaçırdıysa Gemini mod komutunu tanımış olabilir (internetli yedek)
-    if destination.upper() in ("MOD_EV", "MOD_SOKAK"):
-        print(f"  🔁 Gemini mod komutu tanıdı: {destination}")
-        switch_mode_by_voice(sesli_komut.KOMUT_EV if destination.upper() == "MOD_EV"
-                             else sesli_komut.KOMUT_SOKAK)
-        return
-    print(f"  📍 Anlaşılan hedef: '{destination}'")
-
-    # 2. Geocode
-    dest_coords, dest_formatted = geocode(destination)
+    dest_coords, dest_formatted = geocode(hedef)
     if not dest_coords:
         if maps_key_rejected:
             print("  ❌ Maps anahtarı geçersiz, navigasyon bu oturumda kapatıldı")
-            speak_blocking("Navigasyon şu an kullanılamıyor.")
-            return
-        speak_blocking(f"{destination} adresi bulunamadı.")
+            konus("Navigasyon şu an kullanılamıyor.")
+        else:
+            konus(f"{hedef} adresi bulunamadı.")
         return
     print(f"  ✓ {dest_formatted} → {dest_coords}")
-
-    # 3. Mevcut konum
-    origin = get_current_location()
-    print(f"  📍 Mevcut konum: {origin}")
-
-    # 4. Rotayı al
-    route = get_directions(origin, dest_coords)
+    route = get_directions(get_current_location(), dest_coords)
     if not route:
-        speak_blocking("Rota bulunamadı.")
+        konus("Rota bulunamadı.")
         return
-
-    # 5. Duyur
-    summary = (
-        f"Hedef {dest_formatted}. "
-        f"Toplam mesafe {route['total_distance']}, "
-        f"yaklaşık {route['total_duration']} yürüyüş. "
-    )
+    ozet = (f"Hedef {dest_formatted}. Toplam {route['total_distance']}, "
+            f"yaklaşık {route['total_duration']} yürüyüş.")
     if route["steps"]:
-        first = route["steps"][0]
-        summary += f"İlk adım: {first['instruction']}, {first['distance']}."
-    speak_blocking(summary)
-    print(f"  ✓ Toplam {route['step_count']} adım var (sonraki versiyonda adım adım duyurulacak)")
+        ilk = route["steps"][0]
+        ozet += f" İlk adım: {ilk['instruction']}, {ilk['distance']}."
+    konus(ozet)
 
 
-# ───────────────── EV MODU HANDLER ─────────────────
-def handle_home_mode(cam):
-    # Voice event'i bekle (timeout ile ki mod değişimini de yakalayalım)
-    if not voice_ready.wait(timeout=0.5):
-        return
-    voice_ready.clear()
-
-    # Kayıt bir mod komutuysa Gemini'ye gönderme
-    if sesli_komut_isle():
-        return
-
-    frame = cam.get()
-    if frame is None:
-        print("⚠️ Görüntü yok")
-        return
-
-    small = cv2.resize(frame, (320, 240))
-    _, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 60])
-    img_b64 = base64.b64encode(buf).decode("utf-8")
-
+# ───────────────── DÜĞME OLAYLARI ─────────────────
+def kapat():
+    print("\nÇıkılıyor...")
     try:
-        with open("/tmp/prompt.wav", "rb") as f:
-            audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-    except FileNotFoundError:
-        print("⚠️ Ses dosyası yok")
-        return
-
-    print("🤖 Gemini'ye gönderiliyor (ses + görüntü)...")
-    response = ask_ai_home(img_b64, audio_b64)
-
-    # Vosk kaçırdıysa Gemini mod komutunu tanımış olabilir (internetli yedek)
-    komut = (response or "").strip().strip(".'\"").upper()
-    if komut in ("MOD_EV", "MOD_SOKAK"):
-        print(f"  🔁 Gemini mod komutu tanıdı: {komut}")
-        switch_mode_by_voice(sesli_komut.KOMUT_EV if komut == "MOD_EV" else sesli_komut.KOMUT_SOKAK)
-        return
-
-    if response:
-        print(f"📢 {response}")
-        tts_queue.put(response)
-        t_start = time.time()
-        while not tts_busy.is_set() and time.time() - t_start < 3:
-            time.sleep(0.05)
-        while tts_busy.is_set():
-            time.sleep(0.2)
-    else:
-        print("⚠️ Cevap alınamadı")
-        tts_queue.put("Cevap alınamadı, lütfen tekrar deneyin.")
-        while tts_busy.is_set():
-            time.sleep(0.2)
+        dugme.kapat()
+        guvenlik_sistemi.durdur()
+    finally:
+        restore_terminal()
+        os._exit(0)
 
 
-# ───────────────── SOKAK MODU HANDLER ─────────────────
-def handle_street_mode(cam, last_text):
-    # 1. Navigasyon isteği bekliyorsa önce onu işle
-    if street_voice_ready.is_set():
-        street_voice_ready.clear()
-        # Kayıt bir mod komutuysa navigasyon isteği sayma
-        if sesli_komut_isle():
-            return ""
-        handle_navigation_request()
-        return ""  # last_text sıfırla, obstacle detection yeniden başlasın
+def olay_geldi(olay):
+    """Düğme/klavye thread'inden çağrılır. Hızlı işler burada, ağır işler ana döngüde."""
+    if olay == kontrol.CIKIS:
+        kapat()
+    elif olay == kontrol.KISA:
+        # Konuşma sürüyorsa kısa basış önce susturur
+        if konusmayi_kes():
+            print("\n🤫 Susturuldu")
+            return
+        olay_kuyrugu.put((kontrol.KISA, None))
+    elif olay == kontrol.UZUN_BASLADI:
+        konusmayi_kes()
+        threading.Thread(target=ses_yoneticisi.normal_cal,
+                         args=(guvenlik.ses_yolu("ton_dinliyor"),), daemon=True).start()
+        recorder.start()
+    elif olay == kontrol.UZUN_BITTI:
+        yol = recorder.stop()
+        if yol:
+            # Bir sonraki kayıt üzerine yazmasın diye kopyala
+            kopya = f"/tmp/soru_{time.time():.0f}.wav"
+            shutil.copyfile(yol, kopya)
+            olay_kuyrugu.put((SORU, kopya))
+    elif olay == kontrol.CIFT:
+        konusmayi_kes()
+        olay_kuyrugu.put((kontrol.CIFT, None))
 
-    # 2. Kayıt sırasında bekle — TTS ile mikrofon çakışmasın
-    if recorder.recording:
-        time.sleep(0.2)
-        return last_text
 
-    # 3. Normal obstacle detection
-    frame = cam.get()
-    if frame is None:
-        time.sleep(0.3)
-        return last_text
+dugme = kontrol.Dugme(olay_geldi)
 
-    small = cv2.resize(frame, (320, 240))
-    _, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 50])
-    img_b64 = base64.b64encode(buf).decode("utf-8")
 
-    print("🚶 [SOKAK] Frame işleniyor (paralel)...")
-    t_total = time.time()
-    ai_text, depth_info = parallel_process(frame, img_b64)
-    print(f"  ⏱️ Toplam: {time.time() - t_total:.1f}s")
-
-    if depth_info:
-        print(f"   📏 Sol: {depth_info['left']:.2f}m | "
-              f"Orta: {depth_info['center']:.2f}m | "
-              f"Sağ: {depth_info['right']:.2f}m")
-
-    spoken = combine_results(ai_text, depth_info)
-    # Cycle sırasında kullanıcı kayda başladıysa TTS atla — çakışmayı önle
-    if spoken and not recorder.recording:
-        print(f"📢 {spoken}")
-        if spoken.lower() != last_text.lower():
-            last_text = spoken
-            tts_queue.put(spoken)
-            t_start = time.time()
-            while not tts_busy.is_set() and time.time() - t_start < 3:
-                time.sleep(0.05)
-            while tts_busy.is_set():
-                time.sleep(0.2)
-            print(f"⏳ {RATE_LIMIT_DELAY}s bekleniyor...")
-            time.sleep(RATE_LIMIT_DELAY)
-        else:
-            print("⏭️ Aynı sonuç")
-            time.sleep(1)
-    else:
-        time.sleep(1)
-    return last_text
+def keyboard_loop():
+    """stdin'den tek tuş okuyup düğme olayına çeviren daemon döngü."""
+    while True:
+        try:
+            r, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if r:
+                key = sys.stdin.read(1)
+                if key:
+                    dugme.tus(key)
+        except Exception as e:
+            print(f"keyboard error: {e}")
+            time.sleep(0.5)
 
 
 # ───────────────── MAIN ─────────────────
@@ -947,39 +873,40 @@ def main():
     print("SYSTEM STARTING...")
     cam = Camera().start()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
-    threading.Thread(target=tts_worker, daemon=True).start()
-
+    dugme.baslat()
     if setup_raw_terminal():
         threading.Thread(target=keyboard_loop, daemon=True).start()
-    else:
-        print("⚠️  Klavye thread başlatılmadı, sokak modunda sabit kalacak")
 
     time.sleep(2)
     print("\n" + "=" * 50)
     print("SİSTEM HAZIR")
     print("=" * 50)
-    print("Klavye kontrolleri (tek tuş, Enter'sız):")
-    print("  h     → EV MODU      (SPACE: sesli soru sor)")
-    print("  s     → SOKAK MODU   (sürekli analiz + SPACE: navigasyon)")
-    print("  SPACE + \"ev modu\" / \"sokak modu\" → sesli mod değişimi")
-    print("  q     → çıkış")
-    print(f"Başlangıç modu: {current_mode}")
-    print(f"Test konumu: {CURRENT_LOCATION} (GPS sonra)")
+    print("Düğme: kısa = önümde ne var | uzun = soru sor | çift = tekrar")
+    print("Klavye: d = kısa | SPACE = uzun başlat/bitir | r = çift | q = çıkış")
+    print("Sesli ayar (uzun basışla): kısa konuş, detaylı anlat, sessiz ol, durum ne, tekrar et")
+    print(f"Konuşma düzeyi: {ayarlar.get('konusma_duzeyi')}")
     print("=" * 50 + "\n")
-
-    last_text = ""
+    ses_yoneticisi.normal_cal(guvenlik.ses_yolu("ton_hazir"))
 
     while True:
-        with mode_lock:
-            mode = current_mode
-
-        if mode == MODE_HOME:
-            handle_home_mode(cam)
-        elif mode == MODE_STREET:
-            last_text = handle_street_mode(cam, last_text)
-        else:
-            time.sleep(0.5)
+        olay, veri = olay_kuyrugu.get()
+        try:
+            if olay == kontrol.KISA:
+                onumde_ne_var(cam)
+            elif olay == SORU:
+                soruyu_isle(cam, veri)
+                try:
+                    os.remove(veri)
+                except OSError:
+                    pass
+            elif olay == kontrol.CIFT:
+                tekrarla()
+        except Exception as e:
+            print(f"❌ {olay} işlenirken hata: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        kapat()

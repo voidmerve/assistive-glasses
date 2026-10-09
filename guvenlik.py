@@ -106,9 +106,16 @@ SES_DOSYALARI = {
     "tekrar_yok": "Tekrarlanacak bir şey yok",
     "anlamadim": "Anlayamadım, tekrar sorar mısın",
     "internet_gerekli": "Bunun için internet gerekiyor",
+    "ai_yok": "Şu an cevap alamıyorum, birazdan tekrar dener misin",
+    # İnternet yokken "önümde ne var" cevabı: sadece sensör ölçümü
+    "engel_yok": "Önünde iki metre içinde engel yok",
+    "engel_yarim": "Tam önünde, yarım metrede engel var",
+    "engel_bir": "Tam önünde, yaklaşık bir metrede engel var",
+    "engel_bir_bucuk": "Tam önünde, yaklaşık bir buçuk metrede engel var",
+    "engel_iki": "Tam önünde, yaklaşık iki metrede engel var",
 }
 # İnternetsiz üretilen kısa tonlar (sözsüz durum bildirimleri)
-TONLAR = ["ton_internet_yok", "ton_internet_var", "ton_onay", "ton_hazir"]
+TONLAR = ["ton_internet_yok", "ton_internet_var", "ton_onay", "ton_hazir", "ton_dinliyor"]
 TTS_SESI = "tr-TR-EmelNeural"
 ORNEKLEME_HIZI = 24000  # edge-tts çıktısıyla aynı
 
@@ -819,6 +826,21 @@ class SesYoneticisi:
             self._bitti(proc)
             return proc.returncode == 0 and not getattr(proc, "kesildi", False)
 
+    def normal_kes(self):
+        """O an çalan normal sesi (konuşmayı) keser. Kesildiyse True."""
+        with self._kosul:
+            p = self._proc
+            if p is not None and p.poll() is None and self._proc_oncelik == ONCELIK_NORMAL:
+                p.kesildi = True
+                p.terminate()
+                return True
+        return False
+
+    @property
+    def normal_caliyor(self):
+        p = self._proc
+        return p is not None and p.poll() is None and self._proc_oncelik == ONCELIK_NORMAL
+
     def tik(self, guc):
         """Konuşmayı kesmeden üstüne karışan kısa tık."""
         if self._tik_kanali is not None:
@@ -935,6 +957,7 @@ def tonlari_uret(zorla=False):
         "ton_internet_var": [523, 784],        # yükselen: bir şey geldi
         "ton_onay": [988],                     # tek kısa nota: ayar değişti
         "ton_hazir": [523, 659, 784],          # açılış
+        "ton_dinliyor": [1047, 1319],          # uzun basış: dinlemeye başladım
     }
     for ad, notalar in tanim.items():
         if zorla or not os.path.exists(ses_yolu(ad)):
