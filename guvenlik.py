@@ -14,7 +14,7 @@ Parçalar:
 
 Ayarlar (.env):
   SENSOR_MODU=simulasyon       # veya: gercek
-  UYARI_ESIGI_M=1.5            # bu mesafenin altında "Dikkat"
+  UYARI_ESIGI_M=1.2            # bu mesafenin altında "Dikkat"
   ACIL_ESIGI_M=0.7             # bu mesafenin altında "Dur"
   HISTEREZIS_M=0.15            # uyarıdan çıkmak için eşiğin bu kadar üstüne çıkmalı
   UYARI_BEKLEME_S=4            # aynı uyarı en erken bu kadar saniye sonra tekrar çalar
@@ -22,12 +22,14 @@ Ayarlar (.env):
   SENSOR_HZ=15                 # saniyedeki okuma sayısı
   INTERNET_KONTROL_S=5         # internet kontrol aralığı
   SIM_HATA_ORANI=0.005         # simülasyonda yapay okuma hatası olasılığı (0 = kapalı)
+  SENSOR_ARIZA_S=2             # bu kadar saniye art arda hata → "Mesafe sensörü çalışmıyor"
   SES_UYANIK_TUT=1             # Bluetooth çıkışını uyutmamak için arka planda sessizlik çal (0 = kapalı)
 
 Tek başına test:
   python3 guvenlik.py                 # simülasyon + ses
   python3 guvenlik.py --sessiz        # simülasyon, ses çalmadan sadece ekrana yazar
   python3 guvenlik.py --sure 60       # 60 saniye sonra kendiliğinden çıkar
+  python3 guvenlik.py --ariza 5       # 3. saniyede başlayıp 5 sn süren sensör arızası simüle eder
   python3 guvenlik.py --sesleri-uret  # sesler/ klasöründeki WAV dosyalarını yeniden üretir (internet gerekir)
 """
 
@@ -63,7 +65,7 @@ def _env_float(ad, varsayilan):
 
 
 SENSOR_MODU = (os.getenv("SENSOR_MODU") or "simulasyon").strip().lower()
-UYARI_ESIGI_M = _env_float("UYARI_ESIGI_M", 1.5)
+UYARI_ESIGI_M = _env_float("UYARI_ESIGI_M", 1.2)
 ACIL_ESIGI_M = _env_float("ACIL_ESIGI_M", 0.7)
 HISTEREZIS_M = _env_float("HISTEREZIS_M", 0.15)
 UYARI_BEKLEME_S = _env_float("UYARI_BEKLEME_S", 4.0)
@@ -71,6 +73,7 @@ ACIL_YAKLASMA_M = _env_float("ACIL_YAKLASMA_M", 0.15)
 SENSOR_HZ = _env_float("SENSOR_HZ", 15.0)
 INTERNET_KONTROL_S = _env_float("INTERNET_KONTROL_S", 5.0)
 SIM_HATA_ORANI = _env_float("SIM_HATA_ORANI", 0.005)
+SENSOR_ARIZA_S = _env_float("SENSOR_ARIZA_S", 2.0)
 # Bluetooth çıkışı 5 sn boşta kalınca uyuyor, uyanırken sesin başı kayboluyor.
 # 1 iken arka planda sürekli sessizlik çalınır, çıkış hep uyanık kalır.
 SES_UYANIK_TUT = (os.getenv("SES_UYANIK_TUT") or "1").strip() not in ("0", "hayir", "hayır", "false")
@@ -81,6 +84,10 @@ SES_DOSYALARI = {
     "dur": "Dur",
     "internet_kesildi": "İnternet bağlantısı kesildi, sadece engel uyarısı aktif",
     "internet_geldi": "İnternet bağlantısı geri geldi",
+    "sensor_calismiyor": "Mesafe sensörü çalışmıyor",
+    "sensor_calisiyor": "Mesafe sensörü tekrar çalışıyor",
+    "ev_modu": "Ev modu",
+    "sokak_modu": "Sokak modu",
 }
 TTS_SESI = "tr-TR-EmelNeural"
 ORNEKLEME_HIZI = 24000  # edge-tts çıktısıyla aynı
@@ -160,9 +167,13 @@ class SimulasyonSensoru(MesafeSensoru):
 
     ad = "simulasyon"
 
-    def __init__(self, hata_orani=SIM_HATA_ORANI, gurultu_m=0.02):
+    def __init__(self, hata_orani=SIM_HATA_ORANI, gurultu_m=0.02, ariza=None):
         self.hata_orani = hata_orani
         self.gurultu_m = gurultu_m
+        # ariza=(başlangıç sn, süre sn): bu aralıkta her okuma hata verir (arıza testi).
+        # Süre, sensör yeniden başlatılsa da ilk başlatmadan itibaren sayılır.
+        self.ariza = ariza
+        self._ilk_baslatma = None
         # (süre sn, başlangıç m, bitiş m)
         self.senaryo = [
             (2.0, 3.0, 3.0),   # uzakta, engel yok
@@ -176,6 +187,8 @@ class SimulasyonSensoru(MesafeSensoru):
 
     def baslat(self):
         self.t0 = time.monotonic()
+        if self._ilk_baslatma is None:
+            self._ilk_baslatma = self.t0
 
     def gercek_mesafe(self):
         t = (time.monotonic() - self.t0) % self.toplam_sure
@@ -191,6 +204,10 @@ class SimulasyonSensoru(MesafeSensoru):
     def oku(self):
         if self.t0 is None:
             raise RuntimeError("sensör başlatılmadı")
+        if self.ariza is not None:
+            gecen = time.monotonic() - self._ilk_baslatma
+            if self.ariza[0] <= gecen < self.ariza[0] + self.ariza[1]:
+                raise OSError("simüle edilmiş sensör arızası (kablo çıktı)")
         if random.random() < self.hata_orani:
             raise OSError("simüle edilmiş I2C okuma hatası")
         d = self.gercek_mesafe() + random.gauss(0.0, self.gurultu_m)
@@ -199,14 +216,14 @@ class SimulasyonSensoru(MesafeSensoru):
         return max(0.03, d)
 
 
-def sensor_olustur(mod=None):
+def sensor_olustur(mod=None, ariza=None):
+    """ariza=(başlangıç sn, süre sn) sadece simülasyonda kullanılır."""
     mod = (mod or SENSOR_MODU).strip().lower()
     if mod in ("gercek", "gerçek"):
         return GercekSensor()
-    if mod in ("simulasyon", "simülasyon"):
-        return SimulasyonSensoru()
-    print(f"⚠️  [GÜVENLİK] Bilinmeyen SENSOR_MODU={mod!r}, simülasyon kullanılıyor")
-    return SimulasyonSensoru()
+    if mod not in ("simulasyon", "simülasyon"):
+        print(f"⚠️  [GÜVENLİK] Bilinmeyen SENSOR_MODU={mod!r}, simülasyon kullanılıyor")
+    return SimulasyonSensoru(ariza=ariza)
 
 
 class SensorThread(threading.Thread):
@@ -218,10 +235,16 @@ class SensorThread(threading.Thread):
 
     YENIDEN_BASLAT_ESIGI = 15  # art arda bu kadar hata → sensörü yeniden başlat
 
-    def __init__(self, sensor, geri_cagir, hz=SENSOR_HZ):
+    def __init__(self, sensor, geri_cagir, hz=SENSOR_HZ, ariza_bildir=None,
+                 ariza_suresi=SENSOR_ARIZA_S):
         super().__init__(daemon=True, name="guvenlik-sensor")
         self.sensor = sensor
         self.geri_cagir = geri_cagir
+        # ariza_bildir(True) arıza başlayınca, ariza_bildir(False) düzelince bir kere çağrılır
+        self.ariza_bildir = ariza_bildir
+        self.ariza_suresi = ariza_suresi
+        self.arizali = False
+        self._hata_baslangici = None  # art arda hataların başladığı an
         self.periyot = 1.0 / max(1.0, hz)
         self.durdur_olayi = threading.Event()
         self.son_mesafe = None
@@ -243,7 +266,34 @@ class SensorThread(threading.Thread):
             _log(f"🛡️  Sensör hazır: {self.sensor.ad}")
         except Exception as e:
             self._baslatildi = False
+            self.hata_sayisi += 1
             self._hata_yaz(f"sensör başlatılamadı: {type(e).__name__}: {e}")
+            self._hata_kaydet()
+
+    def _hata_kaydet(self):
+        """Okuma veya başlatma hatası. Hatalar ariza_suresi'nden uzun sürerse arıza bildirir."""
+        simdi = time.monotonic()
+        if self._hata_baslangici is None:
+            self._hata_baslangici = simdi
+        if not self.arizali and simdi - self._hata_baslangici >= self.ariza_suresi:
+            self.arizali = True
+            _log(f"🚨 [SENSÖR] {simdi - self._hata_baslangici:.1f} sn'dir okuma yok — ARIZA")
+            self._bildir(True)
+
+    def _basari_kaydet(self):
+        self._hata_baslangici = None
+        if self.arizali:
+            self.arizali = False
+            _log("✅ [SENSÖR] Okumalar düzeldi")
+            self._bildir(False)
+
+    def _bildir(self, arizali):
+        if self.ariza_bildir is None:
+            return
+        try:
+            self.ariza_bildir(arizali)
+        except Exception as e:
+            _log(f"⚠️  [SENSÖR] arıza bildirimi hatası: {e}")
 
     def _hata_yaz(self, mesaj):
         # Ekranı doldurmamak için en fazla 2 sn'de bir yaz
@@ -260,17 +310,20 @@ class SensorThread(threading.Thread):
                 if not self._baslatildi:
                     self._baslatmayi_dene()
                     if not self._baslatildi:
-                        self.durdur_olayi.wait(2.0)
+                        # Arıza süresini kaçırmamak için kısa aralıklarla tekrar dene
+                        self.durdur_olayi.wait(min(2.0, max(0.5, self.ariza_suresi / 2)))
                         sonraki = time.monotonic()
                         continue
 
                 try:
                     ham = self.sensor.oku()
                     self._ardisik_hata = 0
+                    self._basari_kaydet()
                 except Exception as e:
                     self.hata_sayisi += 1
                     self._ardisik_hata += 1
                     self._hata_yaz(f"okuma hatası: {type(e).__name__}: {e}")
+                    self._hata_kaydet()
                     if self._ardisik_hata >= self.YENIDEN_BASLAT_ESIGI:
                         _log("⚠️  [SENSÖR] Art arda çok hata, sensör yeniden başlatılıyor")
                         self._ardisik_hata = 0
@@ -757,7 +810,8 @@ class GuvenlikSistemi:
         self.ses = ses or SesYoneticisi(sessiz=sessiz)
         self.mantik = UyariMantigi()
         self.ekran = ekran
-        self.sensor_thread = SensorThread(self.sensor, self._okuma_geldi)
+        self.sensor_thread = SensorThread(self.sensor, self._okuma_geldi,
+                                          ariza_bildir=self._ariza_degisti)
         self.internet = InternetIzleyici(self.ses) if internet_izle else None
         self.son_uyari = None
         self._sayac = 0
@@ -779,6 +833,20 @@ class GuvenlikSistemi:
         if self.internet:
             self.internet.start()
         return self
+
+    def _ariza_degisti(self, arizali):
+        if arizali:
+            # Kullanıcı artık engel uyarısı alamayacak: bunu acil öncelikle söyle
+            self.ses.acil_cal(self._dosya_ya_da_bip("sensor_calismiyor"))
+        else:
+            threading.Thread(target=self.ses.normal_cal,
+                             args=(self._dosya_ya_da_bip("sensor_calisiyor"),),
+                             daemon=True).start()
+
+    @staticmethod
+    def _dosya_ya_da_bip(ad):
+        yol = ses_yolu(ad)
+        return yol if os.path.exists(yol) else ses_yolu("bip")
 
     def _okuma_geldi(self, mesafe):
         sonuc = self.mantik.guncelle(mesafe)
@@ -835,6 +903,8 @@ def main():
     p.add_argument("--sessiz", action="store_true", help="ses çalma, sadece ekrana yaz")
     p.add_argument("--sure", type=float, default=0, help="bu kadar saniye sonra çık (0 = Ctrl+C'ye kadar)")
     p.add_argument("--internetsiz", action="store_true", help="internet izleyiciyi başlatma")
+    p.add_argument("--ariza", type=float, default=0, metavar="SN",
+                   help="simülasyonda 3. saniyede başlayıp SN saniye süren sensör arızası")
     a = p.parse_args()
 
     if a.sesleri_uret:
@@ -842,7 +912,8 @@ def main():
         sesleri_uret(zorla=a.zorla)
         return
 
-    sistem = GuvenlikSistemi(sensor=sensor_olustur(a.mod), sessiz=a.sessiz, ekran=True,
+    ariza = (3.0, a.ariza) if a.ariza > 0 else None
+    sistem = GuvenlikSistemi(sensor=sensor_olustur(a.mod, ariza=ariza), sessiz=a.sessiz, ekran=True,
                              internet_izle=not a.internetsiz).baslat()
     print("Ctrl+C ile çık\n")
     try:

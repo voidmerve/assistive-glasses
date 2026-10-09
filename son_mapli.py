@@ -20,6 +20,11 @@ KONTROLLER (SSH üzerinden, Enter'a gerek yok — tek tuş):
     s     → SOKAK MODU      (sürekli analiz + SPACE = navigasyon)
     q     → çıkış
 
+SESLİ MOD DEĞİŞİMİ (internetsiz, vosk):
+    SPACE bas → "ev modu" / "eve geç" ya da "sokak modu" / "dışarı çık" → SPACE bas.
+    Kayıt önce yerelde yazıya çevrilir. Mod komutuysa mod değişir ve Gemini'ye
+    gönderilmez. Komut değilse eskisi gibi Gemini'ye gider. h/s tuşları yedektir.
+
 EV MODU:
     SPACE bas → konuş → SPACE bas → görüntü + ses Gemini'ye gider, cevap TTS.
 
@@ -66,6 +71,7 @@ from picamera2 import Picamera2
 from transformers import pipeline
 from dotenv import load_dotenv
 import guvenlik
+import sesli_komut
 
 # ───────────────── CONFIG ─────────────────
 # API key'ler bu dosyayla aynı klasördeki .env dosyasından okunur.
@@ -119,6 +125,9 @@ tts_busy = threading.Event()
 # önceliklidir ve o an çalan normal konuşmayı keser.
 ses_yoneticisi = guvenlik.SesYoneticisi()
 guvenlik_sistemi = guvenlik.GuvenlikSistemi(ses=ses_yoneticisi).baslat()
+
+# Sesli mod komutları için Türkçe vosk modeli, açılışı geciktirmemek için arka planda yüklenir
+komut_tanici = sesli_komut.KomutTanici().yukle_arkaplanda()
 
 # ───────────────── DEPTH MODEL ─────────────────
 print("DEPTH MODELİ YÜKLENİYOR...")
@@ -301,6 +310,28 @@ def handle_key(key):
                 path = recorder.stop()
                 if path:
                     street_voice_ready.set()
+
+
+def sesli_komut_isle(path="/tmp/prompt.wav"):
+    """
+    Kaydı internetsiz olarak yazıya çevirir. Mod komutuysa modu değiştirir,
+    onay sesini çalar ve True döner (kayıt Gemini'ye gönderilmez).
+    Komut değilse ya da model hazır değilse False döner.
+    """
+    global current_mode
+    komut, _ = komut_tanici.tani(path, bekle_s=5)
+    if komut is None:
+        return False
+    yeni = MODE_HOME if komut == sesli_komut.KOMUT_EV else MODE_STREET
+    with mode_lock:
+        current_mode = yeni
+    if yeni == MODE_HOME:
+        print("\n🏠 EV MODU (sesli komut) — SPACE: kayıt başlat/durdur")
+        ses_yoneticisi.normal_cal(guvenlik.ses_yolu("ev_modu"))
+    else:
+        print("\n🚶 SOKAK MODU (sesli komut) — sürekli analiz")
+        ses_yoneticisi.normal_cal(guvenlik.ses_yolu("sokak_modu"))
+    return True
 
 
 def keyboard_loop():
@@ -725,6 +756,10 @@ def handle_home_mode(cam):
         return
     voice_ready.clear()
 
+    # Kayıt bir mod komutuysa Gemini'ye gönderme
+    if sesli_komut_isle():
+        return
+
     frame = cam.get()
     if frame is None:
         print("⚠️ Görüntü yok")
@@ -764,6 +799,9 @@ def handle_street_mode(cam, last_text):
     # 1. Navigasyon isteği bekliyorsa önce onu işle
     if street_voice_ready.is_set():
         street_voice_ready.clear()
+        # Kayıt bir mod komutuysa navigasyon isteği sayma
+        if sesli_komut_isle():
+            return ""
         handle_navigation_request()
         return ""  # last_text sıfırla, obstacle detection yeniden başlasın
 
@@ -832,6 +870,7 @@ def main():
     print("Klavye kontrolleri (tek tuş, Enter'sız):")
     print("  h     → EV MODU      (SPACE: sesli soru sor)")
     print("  s     → SOKAK MODU   (sürekli analiz + SPACE: navigasyon)")
+    print("  SPACE + \"ev modu\" / \"sokak modu\" → sesli mod değişimi")
     print("  q     → çıkış")
     print(f"Başlangıç modu: {current_mode}")
     print(f"Test konumu: {CURRENT_LOCATION} (GPS sonra)")
