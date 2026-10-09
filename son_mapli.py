@@ -40,7 +40,8 @@ API KEY'LERİ:
     İlk kurulumda .env.example dosyasını .env adıyla kopyalayıp değerleri doldur.
     Yeni key alınca sadece .env dosyasını değiştir, koda dokunmaya gerek yok.
     .env dosyası .gitignore'dadır, git'e gönderilmez.
-    Anahtarlardan biri eksikse program hata mesajı verip durur.
+    Gemini anahtarı eksikse program hata mesajı verip durur.
+    Maps anahtarı boş bırakılabilir, o zaman sadece navigasyon kapalı olur.
 """
 
 import warnings
@@ -79,14 +80,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-_missing_keys = [name for name, value in (
-    ("GEMINI_API_KEY", API_KEY),
-    ("GOOGLE_MAPS_API_KEY", GOOGLE_MAPS_API_KEY),
-) if not value]
-if _missing_keys:
-    print(f"❌ HATA: .env dosyasında şu API anahtarları eksik veya boş: {', '.join(_missing_keys)}")
-    print("   .env.example dosyasını .env adıyla kopyalayıp anahtarları doldurun.")
+if not API_KEY:
+    print("❌ HATA: .env dosyasında GEMINI_API_KEY eksik veya boş.")
+    print("   .env.example dosyasını .env adıyla kopyalayıp anahtarı doldurun.")
     sys.exit(1)
+# Maps anahtarı isteğe bağlı: yoksa program çalışır, sadece navigasyon kapalı olur
+if not GOOGLE_MAPS_API_KEY:
+    print("⚠️  GOOGLE_MAPS_API_KEY boş — navigasyon kapalı, diğer her şey çalışır.")
 
 # Not: 2.5-flash-lite multimodal'dır. Eğer ses inputuyla hata verirse
 # "gemini-2.5-flash" olarak değiştir.
@@ -705,6 +705,9 @@ def get_directions(origin, destination, mode="walking"):
 def handle_navigation_request():
     """Sesi al → hedef çıkar → geocode → directions → TTS."""
     print("\n📍 Navigasyon isteği işleniyor...")
+    if not GOOGLE_MAPS_API_KEY:
+        speak_blocking("Navigasyon şu an kullanılamıyor.")
+        return
     try:
         with open("/tmp/prompt.wav", "rb") as f:
             audio_b64 = base64.b64encode(f.read()).decode("utf-8")
