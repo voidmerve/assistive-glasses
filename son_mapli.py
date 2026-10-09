@@ -130,13 +130,32 @@ guvenlik_sistemi = guvenlik.GuvenlikSistemi(ses=ses_yoneticisi).baslat()
 komut_tanici = sesli_komut.KomutTanici().yukle_arkaplanda()
 
 # ───────────────── DEPTH MODEL ─────────────────
+DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+
+
+def load_depth_model():
+    """
+    Önce diskteki önbellekten yükler (internet gerekmez). Önbellekte yoksa
+    internetten indirir. İkisi de olmazsa None döner: program çökmez, sadece
+    mesafe tahmini olmadan çalışır.
+    """
+    from huggingface_hub import snapshot_download
+    try:
+        local_dir = snapshot_download(DEPTH_MODEL_ID, local_files_only=True)
+        return pipeline(task="depth-estimation", model=local_dir, device=-1)
+    except Exception as e:
+        print(f"  Önbellekten yüklenemedi ({type(e).__name__}), internetten deneniyor...")
+    try:
+        return pipeline(task="depth-estimation", model=DEPTH_MODEL_ID, device=-1)
+    except Exception as e:
+        print(f"⚠️  DEPTH MODELİ YÜKLENEMEDİ, mesafe tahmini kapalı: {type(e).__name__}: {e}")
+        return None
+
+
 print("DEPTH MODELİ YÜKLENİYOR...")
-depth_pipe = pipeline(
-    task="depth-estimation",
-    model="depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
-    device=-1,
-)
-print("DEPTH MODELİ HAZIR")
+depth_pipe = load_depth_model()
+if depth_pipe is not None:
+    print("DEPTH MODELİ HAZIR")
 
 
 # ───────────────── CAMERA ─────────────────
@@ -350,6 +369,8 @@ def keyboard_loop():
 
 # ───────────────── DEPTH ESTIMATION ─────────────────
 def estimate_depth(frame_rgb):
+    if depth_pipe is None:
+        return None
     try:
         t0 = time.time()
         small = cv2.resize(frame_rgb, (256, 192))
