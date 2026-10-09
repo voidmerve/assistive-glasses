@@ -85,7 +85,7 @@ def bilgi(model, ad):
           f"hacim {model.volume() / 1000:6.1f} cm³ | parça sayısı {parca} | {durum}")
 
 
-def onizleme(modeller, yol, gorunumler=((20, -60), (15, 30), (0, -90), (90, -90)), baslik=""):
+def onizleme(modeller, yol, gorunumler=((20, -60), (15, 30), (0, -90), (90, -90)), baslik="", dpi=90):
     """Birkaç açıdan gölgeli önizleme PNG'si. modeller: [(Manifold, renk), ...]"""
     import matplotlib
     matplotlib.use("Agg")
@@ -119,6 +119,6 @@ def onizleme(modeller, yol, gorunumler=((20, -60), (15, 30), (0, -90), (90, -90)
     if baslik:
         fig.suptitle(baslik)
     plt.tight_layout()
-    fig.savefig(yol, dpi=90)
+    fig.savefig(yol, dpi=dpi)
     plt.close(fig)
     return yol
