@@ -452,6 +452,7 @@ class SesYoneticisi:
             self._acil_bekleyen = dosya
             self._acil_mesgul = True
             if calisiyor:
+                p.kesildi = True  # paplay SIGTERM'de 0 ile çıkabiliyor, kesmeyi ayrıca işaretle
                 p.terminate()  # normal sesi (veya farklı acil sesi) hemen kes
             self._kosul.notify_all()
 
@@ -493,7 +494,7 @@ class SesYoneticisi:
                 return False
             proc.wait()
             self._bitti(proc)
-            return proc.returncode == 0
+            return proc.returncode == 0 and not getattr(proc, "kesildi", False)
 
     @property
     def acil_caliyor(self):
