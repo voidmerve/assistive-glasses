@@ -13,3 +13,8 @@
 !tasarim/
 !tasarim/**
 tasarim/__pycache__/
+!hafiza.py
+!goru.py
+!navigasyon.py
+!anlatici.py
+!panel.py

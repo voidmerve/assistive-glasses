@@ -2,60 +2,50 @@
 Asistif Gözlük
 ==============
 
-Görme engelli kullanıcı için Türkçe konuşan akıllı gözlük.
+Görme engelli kullanıcı için Türkçe konuşan akıllı gözlük (tez projesi).
+
+İKİ MOD (sesle "ev modu" / "sokak modu", klavyede h / s):
+    Ev modu   — sessiz yardımcı: sadece sorulunca konuşur. Arka planda anahtar,
+                cüzdan, telefon ve bilgisayarın yerini metin olarak hatırlar
+                ("masanın üzerinde, sol tarafta"); görüntü saklanmaz.
+                "Anahtarım nerede?" → "En son 10 dakika önce masanın üzerinde gördüm."
+    Sokak modu — akıllı anlatıcı (orta yol): yürürken susar; basamak, yaya geçidi,
+                trafik ışığı, gelen otobüs gibi olayları hemen, eczane, durak, tabela
+                gibi yerleri en fazla 30 sn'de bir söyler. "Daha çok/az anlat" ile değişir.
+    İki modda da: engel uyarısı (sensör, internetsiz), sorulara cevap, yazı ve para
+    okuma, "ne görüyorsun" (zengin tarif), "çevreyi tara", navigasyon.
+
+NAVİGASYON:
+    "Pamukkale Üniversitesi'ne götür" → telefon GPS'i ile adım adım yönlendirme,
+    rotadan sapınca yeniden hesaplama, "neredeyim?". Google Maps anahtarı yoksa
+    OpenStreetMap kullanılır (ücretsiz). Telefonda https://<pi-ip>:8443/telefon açılır.
+
+JÜRİ PANELİ (sunum için): http://<pi-ip>:8080/ — kamera + YOLO kutuları, sensör
+    grafiği, konuşma dökümü, eşya hafızası, harita, gecikme ölçümleri.
 
 YAPAY ZEKÂ:
-    Varsayılan: Gemini Live (canli.py). Cevaplar doğrudan ses olarak gelir,
-    mikrofon basılı tutulurken canlı akar, mesafe sensörden fonksiyonla alınır.
-    Önemli olaylar (aşağı basamak, yaya geçidi, trafik ışığı ...) kendiliğinden
-    söylenir, "sessiz ol" denince kapanır.
-    Live bağlı değilse (internet yok, kota bitti) otomatik olarak eski yola
-    döner: REST istek + edge-tts, o da yoksa sensörle cevap.
-    .env: AI_MOTORU=live | rest, OLAY_ARALIGI_S=5 (0 = olay gözcüsü kapalı)
-
-TASARIM İLKELERİ:
-    - Varsayılan durum sessizlik. Kulak trafiği ve çevreyi dinlemek için lazım.
-    - Engel uyarısını sadece mesafe sensörü verir (guvenlik.py): internetsiz,
-      tık ve titreşimle, sadece çarpışmaya doğru yürürken.
-    - Yapay zekâ sadece sorulunca konuşur. Tek cümle, en önemli şey önce.
-    - Yönler saat sistemiyle söylenir: tam önü saat 12, sağ saat 2-3, sol saat 9-10.
+    Varsayılan Gemini Live (canli.py): cevaplar ses olarak gelir, mikrofon basılı
+    tutulurken canlı akar, mesafe sensörden fonksiyonla alınır. Live bağlı değilse
+    REST + edge-tts, o da yoksa sensörle cevap.
 
 KONTROL (tek düğme, kontrol.py):
     kısa basış → "Önümde ne var?" (konuşma sürüyorsa önce susturur)
     uzun basış → basılı tutarken soru sor, bırakınca cevaplanır
     çift basış → son söyleneni tekrarla
-    Düğme takılı değilken klavye: d = kısa, SPACE = uzun başlat/bitir, r = çift, q = çıkış
-
-SESLİ AYARLAR (uzun basışla söylenir, internetsiz anlaşılır):
-    "kısa konuş"    → tek cümlelik cevaplar (varsayılan)
-    "detaylı anlat" → 2-3 cümle, sol/orta/sağ mesafe tahmini ile
-    "sessiz ol"     → sadece sorunca konuşur (kendiliğinden bildirim yok)
-    "durum ne"      → internet ve sensör durumu
-    "tekrar et"     → son söyleneni tekrarlar
-    Bir yere gitmek için: "Beşiktaş çarşısına gitmek istiyorum" (Maps anahtarı gerekir)
-
-İNTERNET YOKKEN:
-    Engel uyarıları aynen çalışır. Kısa basış sensörün ölçtüğü mesafeyi söyler.
-    Sorular için "Bunun için internet gerekiyor" denir.
+    Klavye: d = kısa, SPACE = uzun başlat/bitir, r = çift, h = ev, s = sokak, q = çıkış
 
 ÇALIŞTIRMADAN ÖNCE:
-    1. Bluetooth kulaklığın bağlı olduğundan emin ol.
-    2. Mikrofon ve hoparlör varsayılan olmalı:
+    1. Bluetooth kulaklık bağlı, mikrofon ve hoparlör varsayılan olmalı:
          pactl set-default-source bluez_input.20:23:03:25:87:1C
          pactl set-default-sink bluez_output.20_23_03_25_87_1C.1
-
-API KEY'LERİ (.env):
-    GEMINI_API_KEY=...        # zorunlu
-    GOOGLE_MAPS_API_KEY=...   # isteğe bağlı, boşsa navigasyon kapalı
-    DUGME_PIN=                # fiziksel düğmenin GPIO (BCM) numarası, boşsa klavye
-    .env dosyası git'e gönderilmez.
+    2. .env: GEMINI_API_KEY (zorunlu), GOOGLE_MAPS_API_KEY (isteğe bağlı),
+       DUGME_PIN, TITRESIM_PIN (donanım gelince). .env git'e gönderilmez.
 """
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import os
-import re
 import sys
 import cv2
 import json
@@ -78,8 +68,13 @@ from collections import deque
 from picamera2 import Picamera2
 from transformers import pipeline
 from dotenv import load_dotenv
+import anlatici
+import goru
 import guvenlik
+import hafiza
 import kontrol
+import navigasyon
+import panel
 import sesli_komut
 
 # ───────────────── CONFIG ─────────────────
@@ -94,9 +89,7 @@ if not API_KEY:
     sys.exit(1)
 # Maps anahtarı isteğe bağlı: yoksa program çalışır, sadece navigasyon kapalı olur
 if not GOOGLE_MAPS_API_KEY:
-    print("⚠️  GOOGLE_MAPS_API_KEY boş — navigasyon kapalı, diğer her şey çalışır.")
-# Google anahtarı reddederse (REQUEST_DENIED) oturum boyunca navigasyon kapatılır
-maps_key_rejected = False
+    print("ℹ️  GOOGLE_MAPS_API_KEY boş — navigasyon OpenStreetMap ile çalışacak.")
 
 # Not: 2.5-flash-lite multimodal'dır. Eğer ses inputuyla hata verirse
 # "gemini-2.5-flash" olarak değiştir.
@@ -108,18 +101,15 @@ GEMINI_HEADERS = {"x-goog-api-key": API_KEY}
 HTTP_TIMEOUT = 25
 DEPTH_CALIBRATION = 1.0
 
-# ───────────────── MAPS CONFIG ─────────────────
+# Telefon GPS'i gelene kadar kullanılan sabit test konumu (Denizli)
+TEST_KONUMU = (37.73831482466314, 29.10723965422727)
 
-
-# Şimdilik sabit test konumu — telefon GPS entegre edilince değişecek
-# Format: (lat, lng) — Denizli'de sabit test konumu
-CURRENT_LOCATION = (37.73831482466314, 29.10723965422727)
-
-# ───────────────── AYARLAR (konuşma düzeyi) ─────────────────
+# ───────────────── AYARLAR (mod, konuşma düzeyi, anlatıcı sıklığı) ─────────────────
 AYAR_DOSYASI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ayarlar.json")
 DUZEY_KISA = sesli_komut.KOMUT_KISA
 DUZEY_DETAYLI = sesli_komut.KOMUT_DETAYLI
 DUZEY_SESSIZ = sesli_komut.KOMUT_SESSIZ
+MOD_EV, MOD_SOKAK = "ev", "sokak"
 
 
 def ayarlari_yukle():
@@ -127,7 +117,7 @@ def ayarlari_yukle():
         with open(AYAR_DOSYASI) as f:
             return json.load(f)
     except Exception:
-        return {"konusma_duzeyi": DUZEY_KISA}
+        return {}
 
 
 def ayarlari_kaydet():
@@ -138,7 +128,7 @@ def ayarlari_kaydet():
         print(f"⚠️  Ayarlar kaydedilemedi: {e}")
 
 
-ayarlar = ayarlari_yukle()
+ayarlar = {"konusma_duzeyi": DUZEY_KISA, "mod": MOD_SOKAK, "siklik": "orta", **ayarlari_yukle()}
 
 # ───────────────── GÜVENLİK KATMANI ─────────────────
 # Mesafe sensörü + engel uyarıları + internet izleyici. İnternetten ve yapay
@@ -459,11 +449,26 @@ def _gemini_post(payload, label="", max_retries=2):
     return None
 
 
+# ───────────────── PANEL YAYINI ─────────────────
+juri_paneli = None  # main() içinde kurulur
+
+
+def yayinla(tur, veri):
+    if juri_paneli is not None:
+        juri_paneli.yayinla(tur, veri)
+
+
+def olcum(ad, deger, birim="s"):
+    if juri_paneli is not None:
+        juri_paneli.olcum(ad, deger, birim)
+
+
 # ───────────────── KONUŞMA ─────────────────
 # Her konuşmanın bir "nesli" var. Kısa basışla susturulunca nesil artar ve
 # henüz sentezlenmekte olan cümle de çalınmadan atılır.
 _konusma_nesli = 0
 _konusma_kilidi = threading.Lock()
+_konusma_hazirlaniyor = threading.Event()
 SON_KONUSMA = "/tmp/son_konusma.mp3"
 son_ses = None  # çift basışta tekrarlanacak dosya
 
@@ -479,9 +484,6 @@ def konusmayi_kes():
     return kesildi or hazirlaniyor or canli_kesildi
 
 
-_konusma_hazirlaniyor = threading.Event()
-
-
 def oynat(yol):
     """Önceden kaydedilmiş bir sesi çalar (internetsiz) ve tekrar için hatırlar."""
     global son_ses
@@ -493,15 +495,22 @@ def konus(text):
     """Metni edge-tts ile seslendirir (internet gerekir), bitene ya da kesilene kadar bekler."""
     global son_ses
     print(f"📢 {text}")
+    yayinla("gozluk", text)
     with _konusma_kilidi:
         nesil = _konusma_nesli
     _konusma_hazirlaniyor.set()
+    f = f"/tmp/tts_{threading.get_ident()}.mp3"
     try:
-        f = "/tmp/tts.mp3"
-        asyncio.run(edge_tts.Communicate(text, "tr-TR-EmelNeural").save(f))
-    except Exception as e:
-        print(f"TTS ERROR: {type(e).__name__}: {e}")
-        return
+        # Microsoft servisi ara sıra 403 dönüyor: bir kez daha dene
+        for deneme in range(2):
+            try:
+                asyncio.run(edge_tts.Communicate(text, "tr-TR-EmelNeural").save(f))
+                break
+            except Exception as e:
+                if deneme == 1:
+                    print(f"TTS ERROR: {type(e).__name__}: {str(e)[:120]}")
+                    return
+                time.sleep(1.0)
     finally:
         _konusma_hazirlaniyor.clear()
     if nesil != _konusma_nesli:
@@ -513,12 +522,114 @@ def konus(text):
         print("🔇 Konuşma kesildi")
 
 
+def soyle(metin):
+    """Kullanıcıya bir cümle söyler: Live bağlıysa onun sesiyle, değilse edge-tts ile."""
+    if canli_hazir() and canli.soyle(metin):
+        return
+    if internet_var():
+        konus(metin)
+    else:
+        print(f"🔇 İnternet yok, söylenemedi: {metin}")
+
+
 def internet_var():
     # İzleyici henüz ilk kontrolü yapmadıysa (None) var sayıp denenir
     return guvenlik_sistemi.internet_var is not False
 
 
-# ───────────────── GEMINI İSTEMLERİ ─────────────────
+# ───────────────── MOD VE AYARLAR ─────────────────
+anlatim = anlatici.Anlatici(siklik=ayarlar.get("siklik", "orta"))
+
+
+def mod():
+    return ayarlar.get("mod", MOD_SOKAK)
+
+
+def durum_ozeti():
+    nav_durum = navigator.durum() if navigator else None
+    return {
+        "mod": "home" if mod() == MOD_EV else "street",
+        "duzey": ayarlar.get("konusma_duzeyi"),
+        "siklik": anlatim.siklik,
+        "internet": bool(internet_var()),
+        "ai": ("Live (bağlı)" if canli_hazir() else "Live (bağlanıyor)") if canli is not None else "REST",
+        "hafiza": esya_hafizasi.liste(),
+        "nav": nav_durum,
+    }
+
+
+def mod_degistir(yeni, sesli_onay=True):
+    """yeni: "ev" | "sokak". sesli_onay: önceden kaydedilmiş "Ev modu" sesini çal."""
+    if yeni not in (MOD_EV, MOD_SOKAK):
+        return
+    ayarlar["mod"] = yeni
+    ayarlari_kaydet()
+    print(f"\n{'🏠 EV' if yeni == MOD_EV else '🚶 SOKAK'} MODU")
+    if canli is not None:
+        canli.not_dus(f"Mod değişti: artık {yeni} modundasın.")
+    yayinla("durum", durum_ozeti())
+    if sesli_onay:
+        oynat(guvenlik.ses_yolu(f"{yeni}_modu"))
+
+
+def siklik_degistir(yon):
+    yeni = anlatim.siklik_degistir(yon)
+    ayarlar["siklik"] = yeni
+    ayarlari_kaydet()
+    print(f"⚙️  Anlatıcı sıklığı: {yeni} ({anlatim.aralik:.0f} sn)")
+    yayinla("durum", durum_ozeti())
+    return yeni
+
+
+def ayari_uygula(komut):
+    """Sesli komutu uygular (internetsiz; vosk ya da REST yolundan gelir)."""
+    if komut in (DUZEY_KISA, DUZEY_DETAYLI, DUZEY_SESSIZ):
+        ayarlar["konusma_duzeyi"] = komut
+        ayarlari_kaydet()
+        print(f"⚙️  Konuşma düzeyi: {komut}")
+        if canli is not None:
+            canli.not_dus(f"Bundan sonra konuşma düzeyi: {komut}.")
+        yayinla("durum", durum_ozeti())
+        oynat(guvenlik.ses_yolu(f"duzey_{komut}"))
+    elif komut == sesli_komut.KOMUT_DURUM:
+        guvenlik_sistemi.durum_soyle()
+    elif komut == sesli_komut.KOMUT_TEKRAR:
+        tekrarla()
+    elif komut in (sesli_komut.KOMUT_EV, sesli_komut.KOMUT_SOKAK):
+        mod_degistir(komut)
+    elif komut in (sesli_komut.KOMUT_DAHA_COK, sesli_komut.KOMUT_DAHA_AZ):
+        siklik_degistir(komut)
+        oynat(guvenlik.ses_yolu("siklik_cok" if komut == sesli_komut.KOMUT_DAHA_COK else "siklik_az"))
+    elif komut.startswith(sesli_komut.KOMUT_NEREDE):
+        soyle(esya_hafizasi.sorgula(komut[len(sesli_komut.KOMUT_NEREDE):]))
+
+
+# ───────────────── EŞYA HAFIZASI ─────────────────
+esya_hafizasi = hafiza.EsyaHafizasi(
+    degisti=lambda esya, kayit: yayinla("hafiza", {"esya": esya, "kayit": {**kayit, "once": "az önce"}}))
+
+
+def yolo_esya_gordu(sinif, kutu, digerleri, genislik):
+    """YOLO telefon ya da bilgisayar gördü: ev modunda yerini internetsiz kaydet."""
+    if mod() != MOD_EV:
+        return
+    esya_hafizasi.kaydet(hafiza.YOLO_ESYA[sinif], hafiza.yolo_konum_tarifi(kutu, digerleri, genislik), "yolo")
+
+
+# ───────────────── NAVİGASYON ─────────────────
+navigator = None  # main() içinde kurulur
+
+
+def navigasyon_duyur(metin, yon):
+    """Navigasyon duyurusu: Live bağlıysa görüntüdeki bir işaretle zenginleştirerek söyler."""
+    yayinla("nav_duyuru", metin)
+    if canli_hazir() and canli.yonlendir(metin):
+        return
+    if internet_var():
+        konus(metin)
+
+
+# ───────────────── GEMINI İSTEMLERİ (REST yedeği) ─────────────────
 YON_KURALI = (
     "Yönleri saat sistemiyle söyle: görüntünün ortası saat 12, sol kenarı saat 10, "
     "sağ kenarı saat 2. Örnek: 'Saat 1 yönünde kapı.' "
@@ -563,12 +674,14 @@ def istem_soru(sensor_m):
         "görüntüde önündeki sahne var. Türkçe, net ve doğrudan cevap ver. " + _duzey_kurali() +
         YON_KURALI + _mesafe_bilgisi(sensor_m, None) +
         "Yazı, etiket, ilaç kutusu ya da para soruluyorsa okuyup söyle. "
+        "'Ne görüyorsun' gibi isteklerde en fazla 5 cümleyle zengin anlat. "
         "Selamlama ve giriş cümlesi yok.\n"
         "Özel durumlar, bunlarda SADECE belirtilen kelimeyi yaz:\n"
         "- Kullanıcı bir yere gitmek istiyorsa: NAVIGASYON: <yer adı>\n"
-        "- Kısa konuşmamı istiyorsa: AYAR_KISA\n"
-        "- Detaylı anlatmamı istiyorsa: AYAR_DETAYLI\n"
-        "- Sessiz olmamı / sadece sorunca konuşmamı istiyorsa: AYAR_SESSIZ\n"
+        "- Nerede olduğunu soruyorsa: NEREDEYIM\n"
+        "- Anahtar, cüzdan, telefon ya da bilgisayarının yerini soruyorsa: NEREDE: <eşya>\n"
+        "- Ev moduna geçmek istiyorsa: MOD_EV. Sokak moduna: MOD_SOKAK\n"
+        "- Kısa konuşmamı istiyorsa: AYAR_KISA. Detaylı: AYAR_DETAYLI. Sessiz: AYAR_SESSIZ\n"
         "- Cihazın durumunu soruyorsa: DURUM\n"
         "- Son söylediğimi tekrar istiyorsa: TEKRAR\n"
         "- Kayıt boş, gürültü ya da anlaşılmıyorsa: ANLASILMADI"
@@ -599,10 +712,11 @@ def sensorle_cevapla():
     else:
         ad = "engel_iki"
     print(f"📏 Sensörle cevap: {'menzil dışı' if m is None else f'{m:.2f} m'}")
+    yayinla("gozluk", f"(internetsiz, sensör) {'2 metre içinde engel yok' if m is None else f'{m:.1f} m'}")
     oynat(guvenlik.ses_yolu(ad))
 
 
-# ───────────────── KISA BASIŞ: ÖNÜMDE NE VAR ─────────────────
+# ───────────────── KISA BASIŞ: ÖNÜMDE NE VAR (REST yedeği) ─────────────────
 def onumde_ne_var(cam):
     if not internet_var():
         sensorle_cevapla()
@@ -622,42 +736,33 @@ def onumde_ne_var(cam):
         ]}],
         "generationConfig": {"maxOutputTokens": 120, "temperature": 0.2},
     }
+    t0 = time.time()
     cevap = _gemini_post(payload, label="TARİF")
     if not cevap:
         print("⚠️ Yapay zekâdan cevap yok, sensörle cevaplanıyor")
         sensorle_cevapla()
         return
+    olcum("REST cevap", time.time() - t0)
     konus(cevap.replace('"', "").strip())
 
 
-# ───────────────── UZUN BASIŞ: SORU ─────────────────
-def ayari_uygula(komut):
-    """Sesli ayar komutunu uygular (internetsiz)."""
-    if komut in (DUZEY_KISA, DUZEY_DETAYLI, DUZEY_SESSIZ):
-        ayarlar["konusma_duzeyi"] = komut
-        ayarlari_kaydet()
-        print(f"⚙️  Konuşma düzeyi: {komut}")
-        if canli is not None:
-            canli.ayar_bildir(komut)
-        oynat(guvenlik.ses_yolu(f"duzey_{komut}"))
-    elif komut == sesli_komut.KOMUT_DURUM:
-        guvenlik_sistemi.durum_soyle()
-    elif komut == sesli_komut.KOMUT_TEKRAR:
-        tekrarla()
-
-
+# ───────────────── UZUN BASIŞ: SORU (REST yedeği) ─────────────────
 GEMINI_KOMUTLARI = {
     "AYAR_KISA": DUZEY_KISA,
     "AYAR_DETAYLI": DUZEY_DETAYLI,
     "AYAR_SESSIZ": DUZEY_SESSIZ,
     "DURUM": sesli_komut.KOMUT_DURUM,
     "TEKRAR": sesli_komut.KOMUT_TEKRAR,
+    "MOD_EV": sesli_komut.KOMUT_EV,
+    "MOD_SOKAK": sesli_komut.KOMUT_SOKAK,
 }
 
 
 def soruyu_isle(cam, wav_yolu):
-    # 1. Önce internetsiz: ayar komutu mu?
-    komut, _ = komut_tanici.tani(wav_yolu, bekle_s=5)
+    # 1. Önce internetsiz: komut mu?
+    komut, metin = komut_tanici.tani(wav_yolu, bekle_s=5)
+    if metin:
+        yayinla("kullanici", metin)
     if komut is not None:
         ayari_uygula(komut)
         return
@@ -673,12 +778,14 @@ def soruyu_isle(cam, wav_yolu):
     if img_b64:
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
     parts.append({"inline_data": {"mime_type": "audio/wav", "data": audio_b64}})
+    t0 = time.time()
     cevap = _gemini_post({"contents": [{"parts": parts}],
-                          "generationConfig": {"maxOutputTokens": 200, "temperature": 0.3}},
+                          "generationConfig": {"maxOutputTokens": 250, "temperature": 0.3}},
                          label="SORU")
     if not cevap:
         oynat(guvenlik.ses_yolu("ai_yok"))
         return
+    olcum("REST cevap", time.time() - t0)
 
     # 3. Gemini özel bir durum mu bildirdi?
     temiz = cevap.strip().strip(".'\"").strip()
@@ -689,7 +796,11 @@ def soruyu_isle(cam, wav_yolu):
     elif ust.startswith("ANLASILMADI") or ust.startswith("ANLAŞILMADI"):
         oynat(guvenlik.ses_yolu("anlamadim"))
     elif ust.startswith("NAVIGASYON"):
-        navigasyon(temiz.split(":", 1)[1].strip() if ":" in temiz else "")
+        konus(navigator.baslat(temiz.split(":", 1)[1].strip() if ":" in temiz else ""))
+    elif ust.startswith("NEREDEYIM"):
+        konus(navigator.neredeyim())
+    elif ust.startswith("NEREDE"):
+        konus(esya_hafizasi.sorgula(temiz.split(":", 1)[1] if ":" in temiz else ""))
     else:
         konus(temiz)
 
@@ -703,136 +814,11 @@ def tekrarla():
         ses_yoneticisi.normal_cal(guvenlik.ses_yolu("tekrar_yok"))
 
 
-# ───────────────── MAPS ─────────────────
-def get_current_location():
-    """Mevcut konumu döner. TODO: telefon GPS entegre edilecek."""
-    return CURRENT_LOCATION
-
-
-def _strip_html(text):
-    """Google Directions HTML döndürür, sadece düz metin bırak."""
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = (text.replace("&nbsp;", " ")
-                .replace("&amp;", "ve")
-                .replace("&#39;", "'")
-                .replace("&quot;", '"'))
-    return text
-
-
-def geocode(query):
-    """Yer adı → ((lat, lng), formatted_address). Hata olursa (None, None)."""
-    try:
-        url = "https://maps.googleapis.com/maps/api/geocode/json"
-        params = {
-            "address": query,
-            "key": GOOGLE_MAPS_API_KEY,
-            "language": "tr",
-            "region": "tr",
-        }
-        t0 = time.time()
-        r = requests.get(url, params=params, timeout=10)
-        elapsed = time.time() - t0
-        print(f"  🌐 Geocode: {elapsed:.1f}s - {r.status_code}")
-        if r.status_code != 200:
-            print(f"  ❌ HATA: {r.text[:200]}")
-            return None, None
-        data = r.json()
-        if data.get("status") != "OK":
-            print(f"  ❌ Geocoding: {data.get('status')} - {data.get('error_message', '')}")
-            if data.get("status") == "REQUEST_DENIED":
-                global maps_key_rejected
-                maps_key_rejected = True
-            return None, None
-        results = data.get("results", [])
-        if not results:
-            return None, None
-        loc = results[0]["geometry"]["location"]
-        formatted = results[0].get("formatted_address", query)
-        return (loc["lat"], loc["lng"]), formatted
-    except Exception as e:
-        print(f"GEOCODING ERROR: {type(e).__name__}: {e}")
-        return None, None
-
-
-def get_directions(origin, destination, mode="walking"):
-    """Rotayı döner: total_distance, total_duration, steps, step_count."""
-    try:
-        url = "https://maps.googleapis.com/maps/api/directions/json"
-        params = {
-            "origin": f"{origin[0]},{origin[1]}",
-            "destination": f"{destination[0]},{destination[1]}",
-            "mode": mode,
-            "language": "tr",
-            "key": GOOGLE_MAPS_API_KEY,
-        }
-        t0 = time.time()
-        r = requests.get(url, params=params, timeout=15)
-        elapsed = time.time() - t0
-        print(f"  🗺️  Directions: {elapsed:.1f}s - {r.status_code}")
-        if r.status_code != 200:
-            print(f"  ❌ HATA: {r.text[:200]}")
-            return None
-        data = r.json()
-        if data.get("status") != "OK":
-            print(f"  ❌ Directions: {data.get('status')} - {data.get('error_message', '')}")
-            return None
-        routes = data.get("routes", [])
-        if not routes:
-            return None
-        leg = routes[0]["legs"][0]
-        steps = []
-        for s in leg.get("steps", []):
-            steps.append({
-                "instruction": _strip_html(s.get("html_instructions", "")),
-                "distance": s.get("distance", {}).get("text", ""),
-                "duration": s.get("duration", {}).get("text", ""),
-                "maneuver": s.get("maneuver", ""),
-            })
-        return {
-            "total_distance": leg.get("distance", {}).get("text", ""),
-            "total_duration": leg.get("duration", {}).get("text", ""),
-            "steps": steps,
-            "step_count": len(steps),
-        }
-    except Exception as e:
-        print(f"DIRECTIONS ERROR: {type(e).__name__}: {e}")
-        return None
-
-
-def navigasyon_metni(hedef):
-    """Hedef → geocode → yürüyüş rotası → söylenecek metin."""
-    print(f"\n📍 Navigasyon: '{hedef}'")
-    if not GOOGLE_MAPS_API_KEY or maps_key_rejected:
-        return "Navigasyon şu an kullanılamıyor."
-    if not hedef:
-        return "Nereye gitmek istediğini anlayamadım."
-    dest_coords, dest_formatted = geocode(hedef)
-    if not dest_coords:
-        if maps_key_rejected:
-            print("  ❌ Maps anahtarı geçersiz, navigasyon bu oturumda kapatıldı")
-            return "Navigasyon şu an kullanılamıyor."
-        return f"{hedef} adresi bulunamadı."
-    print(f"  ✓ {dest_formatted} → {dest_coords}")
-    route = get_directions(get_current_location(), dest_coords)
-    if not route:
-        return "Rota bulunamadı."
-    ozet = (f"Hedef {dest_formatted}. Toplam {route['total_distance']}, "
-            f"yaklaşık {route['total_duration']} yürüyüş.")
-    if route["steps"]:
-        ilk = route["steps"][0]
-        ozet += f" İlk adım: {ilk['instruction']}, {ilk['distance']}."
-    return ozet
-
-
-def navigasyon(hedef):
-    konus(navigasyon_metni(hedef))
-
-
 # ───────────────── GEMINI LIVE ─────────────────
 AI_MOTORU = (os.getenv("AI_MOTORU") or "live").strip().lower()
 canli = None   # main() içinde kamera açıldıktan sonra kurulur
 cam = None
+nesne_tanima = None
 
 
 def _mesafe_metni(m):
@@ -851,17 +837,83 @@ def arac_ayar_degistir(duzey):
     ayarlar["konusma_duzeyi"] = duzey
     ayarlari_kaydet()
     print(f"⚙️  Konuşma düzeyi: {duzey}")
+    yayinla("durum", durum_ozeti())
     return {"sonuc": f"Konuşma düzeyi {duzey} olarak ayarlandı."}
+
+
+def arac_anlatim_sikligi(yon):
+    yeni = siklik_degistir(yon)
+    return {"sonuc": f"Anlatım sıklığı: {yeni}, en fazla {anlatim.aralik:.0f} saniyede bir yer bildirilecek."}
+
+
+def arac_mod_degistir(mod):
+    mod_degistir(MOD_EV if mod == "ev" else MOD_SOKAK, sesli_onay=False)
+    return {"sonuc": f"{mod} moduna geçildi."}
 
 
 def arac_durum_bildir():
     return {"internet": "var" if internet_var() else "yok",
             "mesafe_sensoru": "çalışmıyor" if guvenlik_sistemi.sensor_thread.arizali else "çalışıyor",
-            "konusma_duzeyi": ayarlar.get("konusma_duzeyi")}
+            "mod": mod(), "konusma_duzeyi": ayarlar.get("konusma_duzeyi"),
+            "navigasyon": "etkin" if navigator and navigator.aktif else "yok",
+            "telefon_gps": "geliyor" if navigator and navigator.gps_var else "yok"}
+
+
+def arac_esya_kaydet(esya, konum):
+    kaydedildi = esya_hafizasi.kaydet(esya, konum, "gemini")
+    return {"sonuc": "kaydedildi" if kaydedildi else "kaydedilmedi"}
+
+
+def arac_esya_nerede(esya):
+    return {"cevap": esya_hafizasi.sorgula(esya)}
+
+
+def arac_bildir(tur, metin):
+    """Sokak gözcüsünün bildirimi: orta yol kurallarına göre söylenir ya da susulur."""
+    if mod() != MOD_SOKAK:
+        return {"sonuc": "ev modunda bildirim yok"}
+    soylenecek = anlatim.karar(tur, metin)
+    yayinla("olay", f"{'🔊' if soylenecek else '🔇'} [{tur}] {metin}")
+    if soylenecek:
+        print(f"👁️  {tur}: {metin}")
+        if canli is not None:
+            canli.soyle(metin)
+    return {"sonuc": "tamam"}
+
+
+_son_tarama = 0.0
+
+
+def arac_cevreyi_tara():
+    """Kullanıcıya başını çevirmesini söyler, 5 kare toplar, Live'a anlattırır."""
+    global _son_tarama
+    # Model bazen fonksiyonu art arda iki kez çağırıyor: ikinci taramayı yapma
+    if time.monotonic() - _son_tarama < 15:
+        return {"sonuc": "Tarama zaten yapılıyor, tekrar çağırma ve bir şey söyleme."}
+    _son_tarama = time.monotonic()
+    ses_yoneticisi.normal_cal(guvenlik.ses_yolu("tarama"))
+    kareler = []
+    for _ in range(5):
+        kareler.append(kare_jpeg())
+        time.sleep(1.0)
+    kareler = [k for k in kareler if k is not None]
+    yayinla("olay", f"🔄 Çevre taraması: {len(kareler)} kare")
+    if not kareler:
+        return {"sonuc": "Kamera görüntüsü alınamadı."}
+    return {"sonuc": f"{len(kareler)} kare çekildi: ilki sağda (saat 3), sonuncusu solda (saat 9). "
+                     "Gördüklerini saat yönleriyle anlat.", "_resimler": kareler}
 
 
 def arac_navigasyon_baslat(hedef):
-    return {"sonuc": navigasyon_metni(hedef)}
+    return {"sonuc": navigator.baslat(hedef)}
+
+
+def arac_navigasyon_durdur():
+    return {"sonuc": navigator.durdur()}
+
+
+def arac_neredeyim():
+    return {"sonuc": navigator.neredeyim()}
 
 
 def kare_jpeg():
@@ -887,9 +939,13 @@ def canli_kur():
         canli = canli_modulu.CanliAsistan(
             api_key=API_KEY, ses=ses_yoneticisi,
             araclar={"mesafe_olc": arac_mesafe_olc, "ayar_degistir": arac_ayar_degistir,
-                     "durum_bildir": arac_durum_bildir, "navigasyon_baslat": arac_navigasyon_baslat},
+                     "anlatim_sikligi": arac_anlatim_sikligi, "mod_degistir": arac_mod_degistir,
+                     "durum_bildir": arac_durum_bildir, "esya_kaydet": arac_esya_kaydet,
+                     "esya_nerede": arac_esya_nerede, "bildir": arac_bildir,
+                     "cevreyi_tara": arac_cevreyi_tara, "navigasyon_baslat": arac_navigasyon_baslat,
+                     "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim},
             kare_al=kare_jpeg, duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA),
-            son_ses_ayarla=son_ses_ayarla).baslat()
+            mod_al=mod, son_ses_ayarla=son_ses_ayarla, yayinla=yayinla, olcum=olcum).baslat()
         print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}), bağlı değilken REST")
     except Exception as e:
         print(f"⚠️  Gemini Live başlatılamadı, REST kullanılıyor: {type(e).__name__}: {e}")
@@ -898,6 +954,55 @@ def canli_kur():
 
 def canli_hazir():
     return canli is not None and canli.hazir and internet_var()
+
+
+# ───────────────── JÜRİ PANELİ ─────────────────
+def panel_karesi():
+    """Panel için: YOLO kutuları ve sensör bilgisi çizilmiş JPEG."""
+    if cam is None:
+        return None
+    kare = cam.get()
+    if kare is None:
+        return None
+    kare = cv2.resize(kare, (640, 480))
+    if nesne_tanima is not None:
+        kare = nesne_tanima.ciz(kare)  # kamera 640 × 480 veriyor, YOLO kutuları aynı ölçekte
+    m = guvenlik_sistemi.son_mesafe
+    yazi = f"{'EV' if mod() == MOD_EV else 'SOKAK'} | sensor: {'>2 m' if m is None else f'{m:.2f} m'}"
+    cv2.rectangle(kare, (0, 0), (640, 26), (0, 0, 0), -1)
+    cv2.putText(kare, yazi, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    _, buf = cv2.imencode(".jpg", kare, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return buf.tobytes()
+
+
+def panel_besleyici():
+    """Sensör, YOLO ve "Dur" uyarılarını panele aktarır; "Dur" anındaki TTC'yi ölçüm olarak yazar."""
+    son_dur = guvenlik_sistemi.sayac[guvenlik.OLAY_DUR]
+    son_yolo = 0.0
+    sayac = 0
+    while True:
+        try:
+            mt = guvenlik_sistemi.mantik
+            yayinla("sensor", {
+                "mesafe": guvenlik_sistemi.son_mesafe, "hiz": mt.hiz,
+                "ttc": None if mt.ttc == float("inf") else mt.ttc, "seviye": mt.seviye,
+                "arizali": guvenlik_sistemi.sensor_thread.arizali, "kaynak": guvenlik_sistemi.sensor.ad})
+            dur = guvenlik_sistemi.sayac[guvenlik.OLAY_DUR]
+            if dur != son_dur:
+                son_dur = dur
+                m = guvenlik_sistemi.son_mesafe
+                yayinla("uyari", f"DUR — {'?' if m is None else f'{m:.2f} m'}, {mt.hiz:.2f} m/s")
+                if mt.ttc != float("inf"):
+                    olcum("Dur anında çarpışmaya kalan", mt.ttc)
+            if nesne_tanima is not None and nesne_tanima.son_zaman != son_yolo:
+                son_yolo = nesne_tanima.son_zaman
+                yayinla("nesneler", nesne_tanima.ozet())
+            sayac += 1
+            if sayac % 25 == 0:
+                yayinla("durum", durum_ozeti())
+        except Exception as e:
+            print(f"⚠️  Panel besleyici: {type(e).__name__}: {e}")
+        time.sleep(0.2)
 
 
 # ───────────────── DÜĞME OLAYLARI ─────────────────
@@ -945,19 +1050,25 @@ def olay_geldi(olay):
     elif olay == kontrol.CIFT:
         konusmayi_kes()
         olay_kuyrugu.put((kontrol.CIFT, None))
+    elif olay in ("ev", "sokak"):
+        olay_kuyrugu.put(("mod", olay))
 
 
 dugme = kontrol.Dugme(olay_geldi)
 
 
 def keyboard_loop():
-    """stdin'den tek tuş okuyup düğme olayına çeviren daemon döngü."""
+    """stdin'den tek tuş okuyup düğme olayına çeviren daemon döngü (h / s: mod)."""
     while True:
         try:
             r, _, _ = select.select([sys.stdin], [], [], 0.2)
             if r:
                 key = sys.stdin.read(1)
-                if key:
+                if key in ("h", "H"):
+                    olay_geldi("ev")
+                elif key in ("s", "S"):
+                    olay_geldi("sokak")
+                elif key:
                     dugme.tus(key)
         except Exception as e:
             print(f"keyboard error: {e}")
@@ -966,24 +1077,34 @@ def keyboard_loop():
 
 # ───────────────── MAIN ─────────────────
 def main():
+    global cam, juri_paneli, navigator, nesne_tanima
     print("SYSTEM STARTING...")
-    global cam
     cam = Camera().start()
+    navigator = navigasyon.Navigasyon(
+        duyur=navigasyon_duyur, google_anahtari=GOOGLE_MAPS_API_KEY or None,
+        degisti=lambda d: yayinla("nav", d), yedek_konum=TEST_KONUMU)
+    juri_paneli = panel.Panel(kare_al=panel_karesi, durum_al=durum_ozeti,
+                              konum_geldi=navigator.konum_guncelle).baslat()
+    if goru.YOLO_ACIK:
+        nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
+        nesne_tanima.start()
     canli_kur()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
     dugme.baslat()
     if setup_raw_terminal():
         threading.Thread(target=keyboard_loop, daemon=True).start()
+    threading.Thread(target=panel_besleyici, daemon=True, name="panel-besleyici").start()
 
     time.sleep(2)
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("SİSTEM HAZIR")
-    print("=" * 50)
+    print("=" * 60)
     print("Düğme: kısa = önümde ne var | uzun = soru sor | çift = tekrar")
-    print("Klavye: d = kısa | SPACE = uzun başlat/bitir | r = çift | q = çıkış")
-    print("Sesli ayar (uzun basışla): kısa konuş, detaylı anlat, sessiz ol, durum ne, tekrar et")
-    print(f"Konuşma düzeyi: {ayarlar.get('konusma_duzeyi')}")
-    print("=" * 50 + "\n")
+    print("Klavye: d = kısa | SPACE = uzun başlat/bitir | r = çift | h = ev | s = sokak | q = çıkış")
+    print("Sesle: ev modu, sokak modu, ne görüyorsun, çevreyi tara, anahtarım nerede,")
+    print("       ... götür, neredeyim, daha çok/az anlat, kısa konuş, detaylı anlat, sessiz ol")
+    print(f"Mod: {mod()} | konuşma düzeyi: {ayarlar.get('konusma_duzeyi')} | anlatıcı: {anlatim.siklik}")
+    print("=" * 60 + "\n")
     ses_yoneticisi.normal_cal(guvenlik.ses_yolu("ton_hazir"))
 
     while True:
@@ -999,6 +1120,8 @@ def main():
                     pass
             elif olay == kontrol.CIFT:
                 tekrarla()
+            elif olay == "mod":
+                mod_degistir(veri)
         except Exception as e:
             print(f"❌ {olay} işlenirken hata: {type(e).__name__}: {e}")
 

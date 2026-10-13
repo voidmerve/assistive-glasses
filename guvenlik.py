@@ -113,6 +113,12 @@ SES_DOSYALARI = {
     "engel_bir": "Tam önünde, yaklaşık bir metrede engel var",
     "engel_bir_bucuk": "Tam önünde, yaklaşık bir buçuk metrede engel var",
     "engel_iki": "Tam önünde, yaklaşık iki metrede engel var",
+    # Modlar ve sokak anlatıcısı
+    "ev_modu": "Ev modu",
+    "sokak_modu": "Sokak modu",
+    "siklik_cok": "Daha sık anlatacağım",
+    "siklik_az": "Daha seyrek anlatacağım",
+    "tarama": "Başını yavaşça sağdan sola çevir",
 }
 # İnternetsiz üretilen kısa tonlar (sözsüz durum bildirimleri)
 TONLAR = ["ton_internet_yok", "ton_internet_var", "ton_onay", "ton_hazir", "ton_dinliyor"]

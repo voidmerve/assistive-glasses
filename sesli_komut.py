@@ -2,10 +2,13 @@
 Asistif Gözlük - İnternetsiz Sesli Komut Tanıma
 ===============================================
 
-Uzun basışla alınan kayıt Gemini'ye gitmeden önce burada vosk (Türkçe model)
-ile yerelde yazıya çevrilir. Kayıt bir ayar komutuysa ("kısa konuş", "detaylı
-anlat", "sessiz ol", "durum ne", "tekrar et") internetsiz uygulanır ve kayıt
-Gemini'ye hiç gönderilmez.
+Uzun basışla alınan kayıt burada vosk (Türkçe model) ile yerelde yazıya
+çevrilir. Komutlar internetsiz anlaşılır:
+  "ev modu" / "sokak modu", "kısa konuş", "detaylı anlat", "sessiz ol",
+  "daha çok anlat" / "daha az anlat", "durum ne", "tekrar et",
+  "anahtarım nerede" (cüzdan, telefon, bilgisayar)
+Gemini Live bağlıyken ses zaten Live'a canlı akar ve Live bu komutları
+fonksiyon çağrısıyla anlar; vosk o zaman yedektir.
 
 İleride Gemini Live'a geçildiğinde de internet yokken yedek olarak kalır.
 
@@ -32,6 +35,11 @@ KOMUT_DETAYLI = "detayli"  # detaylı konuşma düzeyi
 KOMUT_SESSIZ = "sessiz"    # sadece sorunca konuş
 KOMUT_DURUM = "durum"      # internet ve sensör durumu
 KOMUT_TEKRAR = "tekrar"    # son söyleneni tekrarla
+KOMUT_EV = "ev"            # ev moduna geç
+KOMUT_SOKAK = "sokak"      # sokak moduna geç
+KOMUT_DAHA_COK = "daha_cok"  # sokak anlatıcısı daha sık konuşsun
+KOMUT_DAHA_AZ = "daha_az"    # daha seyrek
+KOMUT_NEREDE = "nerede:"     # "nerede:anahtar" gibi döner
 
 # Bir kaydın komut sayılması için en fazla kelime sayısı. Daha uzun cümleler
 # ("kısa yoldan nasıl giderim") soru kabul edilir ve Gemini'ye gider.
@@ -78,11 +86,57 @@ def _kelime_eslesir(kelime, hedefler):
     return _benzer(kelime, hedefler, 0.8)
 
 
+# Ev / sokak modu: "ev" çok kısa ve vosk sık yanlış duyuyor ("hey", "il"), bu yüzden ayrı kurallar
+_EV_KELIMELERI = ["ev", "eve", "evde", "evdeyim", "evdeyiz", "iceri", "iceriye", "icerdeyim"]
+_SOKAK_KELIMELERI = ["sokak", "sokaga", "sokaktayim", "sokakta", "disari", "disariya",
+                     "disardayim", "disaridayim"]
+_MOD_FIILLERI = ["mod", "modu", "moduna", "modunu", "mode", "gec", "gecis", "gectim", "don", "dondum",
+                 "cik", "cikiyorum", "ciktim", "cikalim", "gir", "girdim", "geldim"]
+_ESYA_KELIMELERI = {
+    "anahtar": ["anahtar", "anahtarim", "anahtarlar", "anahtarlarim", "anahtarlik"],
+    "cüzdan": ["cuzdan", "cuzdanim"],
+    "telefon": ["telefon", "telefonum"],
+    "bilgisayar": ["bilgisayar", "bilgisayarim", "laptop", "laptopum"],
+}
+
+
+def _mod_komutu(kelimeler):
+    ev = any(k in _EV_KELIMELERI if len(k) <= 3 else _benzer(k, _EV_KELIMELERI, 0.8) for k in kelimeler)
+    sokak = any(_benzer(k, _SOKAK_KELIMELERI) for k in kelimeler)
+    fiil = any(_benzer(k, _MOD_FIILLERI, 0.8) for k in kelimeler)
+    if ev and sokak:
+        return None
+    if sokak:
+        return KOMUT_SOKAK
+    if ev and (fiil or len(kelimeler) == 1):
+        return KOMUT_EV
+    # "hey modu", "il moduna geç": sadece iki mod var, "sokak" geçmiyorsa ev modudur
+    if len(kelimeler) >= 2 and len(kelimeler[0]) <= 3 and kelimeler[1] in ("modu", "moduna", "modunu"):
+        return KOMUT_EV
+    return None
+
+
 def komut_bul(metin):
-    """Yazıya çevrilmiş metinden KOMUT_* ya da None döner."""
+    """Yazıya çevrilmiş metinden KOMUT_* (ya da "nerede:<eşya>") veya None döner."""
     kelimeler = normallestir(metin).split()
     if not kelimeler or len(kelimeler) > MAKS_KOMUT_KELIME:
         return None
+
+    if any(k in ("nerede", "nerde", "neredeydi", "nereye") for k in kelimeler):
+        for esya, adlar in _ESYA_KELIMELERI.items():
+            if any(_benzer(k, adlar, 0.8) for k in kelimeler):
+                return KOMUT_NEREDE + esya
+        return None  # "durak nerede" gibi: soru, Gemini'ye gitsin
+
+    if "daha" in kelimeler and not ("bir" in kelimeler):
+        if any(k in ("cok", "fazla", "sik") for k in kelimeler):
+            return KOMUT_DAHA_COK
+        if any(k in ("az", "seyrek") for k in kelimeler):
+            return KOMUT_DAHA_AZ
+
+    mod = _mod_komutu(kelimeler)
+    if mod is not None:
+        return mod
 
     for ifade in _TEKRAR_IFADELERI:
         if all(k in kelimeler for k in ifade):
