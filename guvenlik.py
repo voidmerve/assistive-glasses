@@ -23,7 +23,7 @@ Uyarılar:
   Duruyorsan ya da engel seninle aynı hızda gidiyorsa (kalabalık) → sessiz
 
 Ayarlar (.env):
-  SENSOR_MODU=simulasyon       # veya: gercek
+  SENSOR_MODU=simulasyon       # veya: gercek, kapali (sensör yok: mesafe kameradan, mesafe.py)
   TTC_UYARI_S=2.0              # çarpışmaya bu kadar saniye kala tıklamaya başla
   TTC_ACIL_S=1.0               # çarpışmaya bu kadar saniye kala "Dur"
   MIN_YAKLASMA_HIZI=0.25       # m/s. Bundan yavaş yaklaşma "duruyor" sayılır
@@ -283,11 +283,23 @@ class SimulasyonSensoru(MesafeSensoru):
         return max(0.03, d)
 
 
+class KapaliSensor(MesafeSensoru):
+    """Sensör takılı değil ya da askıda: hiç engel görmez, arıza da bildirmez.
+    Bu durumda mesafe kameranın derinlik yapay zekâsından gelir (mesafe.py)."""
+
+    ad = "kapalı"
+
+    def oku(self):
+        return None
+
+
 def sensor_olustur(mod=None, ariza=None, senaryo="karisik"):
     """ariza=(başlangıç sn, süre sn) ve senaryo sadece simülasyonda kullanılır."""
     mod = (mod or SENSOR_MODU).strip().lower()
     if mod in ("gercek", "gerçek"):
         return GercekSensor()
+    if mod in ("kapali", "kapalı", "yok"):
+        return KapaliSensor()
     if mod not in ("simulasyon", "simülasyon"):
         print(f"⚠️  [GÜVENLİK] Bilinmeyen SENSOR_MODU={mod!r}, simülasyon kullanılıyor")
     return SimulasyonSensoru(senaryo=senaryo, ariza=ariza)
@@ -1215,6 +1227,10 @@ class GuvenlikSistemi:
         return None if self.internet is None else self.internet.bagli
 
     @property
+    def sensor_kapali(self):
+        return isinstance(self.sensor, KapaliSensor)
+
+    @property
     def son_mesafe(self):
         """Son 0,5 sn içinde okunan mesafe, yoksa None."""
         t = self.sensor_thread.son_okuma_zamani
@@ -1224,8 +1240,9 @@ class GuvenlikSistemi:
 
     def durum_soyle(self):
         """İnternet ve sensör durumunu önceden kaydedilmiş seslerle söyler (internetsiz)."""
-        parcalar = ["durum_internet_var" if self.internet_var else "durum_internet_yok",
-                    "durum_sensor_yok" if self.sensor_thread.arizali else "durum_sensor_iyi"]
+        parcalar = ["durum_internet_var" if self.internet_var else "durum_internet_yok"]
+        if not self.sensor_kapali:
+            parcalar.append("durum_sensor_yok" if self.sensor_thread.arizali else "durum_sensor_iyi")
         for p in parcalar:
             self.ses.normal_cal(self._dosya_ya_da_bip(p))
 

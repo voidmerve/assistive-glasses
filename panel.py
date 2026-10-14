@@ -58,6 +58,15 @@ def sertifika_hazirla():
     return cert, key
 
 
+def _yer_tutucu(metin, boyut=(320, 240)):
+    """Görüntü hazır olana kadar gösterilen gri kare (tarayıcı beklerken kilitlenmesin)."""
+    import cv2
+    import numpy as np
+    kare = np.full((boyut[1], boyut[0], 3), 40, np.uint8)
+    cv2.putText(kare, metin, (12, boyut[1] // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+    return cv2.imencode(".jpg", kare)[1].tobytes()
+
+
 class Panel:
     """
     kare_al: f() → JPEG bayt (kutular çizilmiş) ya da None
@@ -65,8 +74,9 @@ class Panel:
     konum_geldi: f(lat, lon, dogruluk) → navigasyona
     """
 
-    def __init__(self, kare_al, durum_al, konum_geldi):
+    def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None):
         self.kare_al, self.durum_al, self.konum_geldi = kare_al, durum_al, konum_geldi
+        self.harita_al = harita_al or (lambda: None)  # renkli derinlik haritası (JPEG)
         self._abonelar = []
         self._kilit = threading.Lock()
         self._csv_kilit = threading.Lock()
@@ -112,12 +122,24 @@ class Panel:
 
         @app.route("/video")
         def video():
+            bekleme = _yer_tutucu("kamera hazirlaniyor...", (640, 480))
+
             def akis():
                 while True:
-                    jpeg = self.kare_al()
-                    if jpeg is not None:
-                        yield b"--kare\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                    jpeg = self.kare_al() or bekleme
+                    yield b"--kare\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
                     time.sleep(0.15)
+            return Response(akis(), mimetype="multipart/x-mixed-replace; boundary=kare")
+
+        @app.route("/derinlik")
+        def derinlik():
+            bekleme = _yer_tutucu("derinlik modeli yukleniyor...")
+
+            def akis():
+                while True:
+                    jpeg = self.harita_al() or bekleme
+                    yield b"--kare\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                    time.sleep(0.5)
             return Response(akis(), mimetype="multipart/x-mixed-replace; boundary=kare")
 
         @app.route("/olaylar")
@@ -212,10 +234,16 @@ table{width:100%;border-collapse:collapse;font-size:13px}td{padding:3px 0;border
 <div class="sutun">
  <div class="kart"><h2>Gözlüğün gördüğü (YOLO, cihaz üstünde)</h2><img id="video" src="/video" alt="kamera">
   <div class="nesneler" id="nesneler" style="margin-top:8px"></div></div>
+ <div class="kart"><h2>Kameradan mesafe (derinlik yapay zekâsı, cihaz üstünde)</h2>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
+   <img id="derinlik" src="/derinlik" alt="derinlik haritası" style="width:min(320px,100%);border-radius:8px;background:#000">
+   <div style="flex:1;min-width:180px"><div style="color:var(--soluk);font-size:12px;margin-bottom:6px">Kırmızı yakın, mavi uzak</div>
+    <table id="mesafeler"></table><div id="olcek" style="color:var(--soluk);font-size:12px;margin-top:6px"></div></div>
+  </div></div>
  <div class="kart"><h2>Konuşma ve olaylar</h2><div id="akis"></div></div>
 </div>
 <div class="sutun">
- <div class="kart"><h2>Lazer mesafe sensörü</h2>
+ <div class="kart"><h2 id="sensorbaslik">Lazer mesafe sensörü</h2>
   <div><span id="mesafe">—</span><span id="seviye"></span></div>
   <div style="color:var(--soluk)">Yaklaşma hızı <b id="hiz">—</b> · Çarpışmaya <b id="ttc">—</b></div>
   <canvas id="grafik" width="600" height="120"></canvas></div>
@@ -254,6 +282,7 @@ function isle(m){const v=m.veri;switch(m.tur){
   if(v.hafiza){hafiza=v.hafiza;esyaCiz()}if(v.nav)navCiz(v.nav);break;
  case"sensor":$("mesafe").textContent=v.mesafe==null?"> 2 m":v.mesafe.toFixed(2)+" m";
   $("seviye").textContent=["","YAKLAŞIYOR","DUR"][v.seviye];$("seviye").style.color=["","#f5d90a","#e5484d"][v.seviye];
+  $("sensorbaslik").textContent=v.kaynak&&v.kaynak.startsWith("kamera")?"Mesafe (sensör yok: kameradan)":"Lazer mesafe sensörü";
   $("hiz").textContent=v.hiz.toFixed(2)+" m/s";$("ttc").textContent=v.ttc==null?"—":v.ttc.toFixed(1)+" s";
   rozet("sensor",v.arizali?"arızalı":v.kaynak,!v.arizali);seri.push([m.zaman,v.mesafe,v.seviye]);
   seri=seri.filter(s=>m.zaman-s[0]<30);grafikCiz();break;
@@ -265,7 +294,11 @@ function isle(m){const v=m.veri;switch(m.tur){
  case"nav":navCiz(v);break;case"nav_duyuru":akisa("nav","🧭 "+v);break;
  case"hafiza":hafiza[v.esya]=v.kayit;esyaCiz();akisa("hafiza",`🧠 ${v.esya}: ${v.kayit.konum}`);break;
  case"uyari":akisa("uyari","🛑 "+v);break;
- case"olcum":olcum[v.tur]=v.deger+" "+v.birim;olcumCiz();break}}
+ case"olcum":olcum[v.tur]=v.deger+" "+v.birim;olcumCiz();break
+ case"mesafe":$("mesafeler").innerHTML=`<tr><td><b>Tam önde</b></td><td><b>${v.tam_on.toFixed(1)} m</b></td></tr>`+
+  v.nesneler.slice(0,6).map(n=>`<tr><td>${n.ad} · saat ${n.saat}</td><td>${n.mesafe.toFixed(1)} m${n.kaynak.includes("boy")?" ✓":""}</td></tr>`).join("");
+  $("olcek").textContent=`${v.model==="ev"?"İç mekân":"Dış mekân"} modeli · kalibrasyon ×${v.olcek} · ${v.sure_ms} ms`;
+  olcum["Derinlik süresi"]=v.sure_ms+" ms";olcumCiz();break}}
 esyaCiz();const es=new EventSource("/olaylar");es.onmessage=e=>isle(JSON.parse(e.data));
 setInterval(()=>fetch("/durum").then(r=>r.json()).then(v=>isle({tur:"durum",veri:v})).catch(()=>{}),5000);
 </script></body></html>"""

@@ -78,8 +78,10 @@ KONUŞMA BİÇİMİ:
 - Konuşma düzeyi kısa ise tek cümle, en fazla 12 kelime. Detaylı ise en fazla 3 kısa cümle.
 - Selamlama, giriş cümlesi, gereksiz açıklama yok. En önemli şey önce: engel, basamak, kapı, insan, araç.
 - Yönleri saat sistemiyle söyle: görüntünün ortası saat 12, sol kenarı saat 10, sağ kenarı saat 2.
-- Mesafeyi asla gözle tahmin etme. Mesajda sensör mesafesi varsa onu kullan, yoksa ve gerekiyorsa
-  mesafe_olc fonksiyonunu çağır. Ondalıkları virgülle söyle: "bir virgül dört metre".
+- Mesafeyi asla gözle tahmin etme. Mesajda verilen mesafeleri kullan: lazer sensör kesindir, kamera
+  derinlik tahmini yaklaşıktır ("yaklaşık iki metre" de). Mesafe yoksa ve gerekiyorsa mesafe_olc çağır.
+  Ondalıkları virgülle söyle: "bir virgül dört metre". Nesnenin mesafesini söylerken biçim:
+  "saat 1 yönünde, yaklaşık iki metrede sandalye var".
 - Yazı, etiket, ilaç kutusu, son kullanma tarihi ya da para sorulursa okuyup söyle.
 
 ÖZEL İSTEKLER:
@@ -124,7 +126,8 @@ def _arac_tanimlari(types):
 
     esya = S(type="STRING", enum=["anahtar", "cüzdan", "telefon", "bilgisayar"])
     return [types.Tool(function_declarations=[
-        f("mesafe_olc", "Tam öndeki (saat 12) nesneye lazer sensörle ölçülen kesin mesafe. En fazla 2 metre."),
+        f("mesafe_olc", "Tam öndeki mesafe ve görüntüdeki nesnelerin mesafeleri: lazer sensör (kesin, 2 m'ye kadar) "
+                        "ya da kamera derinlik yapay zekâsı (yaklaşık)."),
         f("ayar_degistir", "Konuşma düzeyini değiştirir.",
           {"duzey": S(type="STRING", enum=["kisa", "detayli", "sessiz"],
                       description="kisa: tek cümle, detayli: 2-3 cümle, sessiz: sadece sorulunca konuş")}),
@@ -158,7 +161,7 @@ class CanliAsistan:
     """
 
     def __init__(self, api_key, ses, araclar, kare_al, duzey_al, mod_al, son_ses_ayarla,
-                 yayinla=None, olcum=None, model=CANLI_MODEL,
+                 yayinla=None, olcum=None, mesafe_bilgisi=None, model=CANLI_MODEL,
                  olay_araligi=OLAY_ARALIGI_S, esya_araligi=ESYA_ARALIGI_S):
         self.api_key = api_key
         self.ses = ses
@@ -169,6 +172,8 @@ class CanliAsistan:
         self.son_ses_ayarla = son_ses_ayarla
         self.yayinla = yayinla or (lambda tur, veri: None)
         self.olcum = olcum or (lambda ad, deger: None)
+        # f(sensor_m) → mesafe metni (sensör + kamera derinlik tahmini). Verilmezse sadece sensör.
+        self.mesafe_bilgisi = mesafe_bilgisi or self._sensor_metni
         self.model = model
         self.olay_araligi = olay_araligi
         self.esya_araligi = esya_araligi
@@ -337,14 +342,14 @@ class CanliAsistan:
                 self._son_etkilesim = time.monotonic()
                 self.yayinla("kullanici", "(kısa basış) Önümde ne var?")
                 await self._metin_turu(oturum, TUR_CEVAP,
-                                       f"Önümde ne var? {self._sensor_metni(komut[1])} {self._baglam()}",
+                                       f"Önümde ne var? {self.mesafe_bilgisi(komut[1])} {self._baglam()}",
                                        [self.kare_al()])
             elif tur == "aktivite_bas":
                 self._son_etkilesim = time.monotonic()
                 self._giris_yazisi = ""
                 await oturum.send_client_content(
                     turns=t.Content(role="user", parts=[t.Part(
-                        text=f"[{self._sensor_metni(komut[2])} {self._baglam()}]")]),
+                        text=f"[{self.mesafe_bilgisi(komut[2])} {self._baglam()}]")]),
                     turn_complete=False)
                 await oturum.send_realtime_input(activity_start=t.ActivityStart())
                 jpeg = self.kare_al()
@@ -362,7 +367,8 @@ class CanliAsistan:
                 await oturum.send_realtime_input(activity_end=t.ActivityEnd())
             elif tur == "gozcu":
                 self.sayac["gozcu"] += 1
-                await self._metin_turu(oturum, TUR_GOZCU, f"{komut[1]} {self._baglam()}", [komut[2]])
+                await self._metin_turu(oturum, TUR_GOZCU,
+                                       f"{komut[1]} {self.mesafe_bilgisi(None)} {self._baglam()}", [komut[2]])
             elif tur == "soyle":
                 await self._metin_turu(oturum, TUR_CEVAP, f"SÖYLE: {komut[1]}")
             elif tur == "yonlendir":

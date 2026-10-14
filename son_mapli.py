@@ -20,6 +20,12 @@ NAVİGASYON:
     rotadan sapınca yeniden hesaplama, "neredeyim?". Google Maps anahtarı yoksa
     OpenStreetMap kullanılır (ücretsiz). Telefonda https://<pi-ip>:8443/telefon açılır.
 
+MESAFE:
+    Lazer sensör (VL53L0X) varsa kesin mesafe ondan. Yoksa (SENSOR_MODU=kapali) kameradan
+    derinlik yapay zekâsı (mesafe.py, Depth Anything V2 Metric): tam öndeki mesafe ve YOLO'nun
+    bulduğu her nesne için "saat 1 yönünde sandalye, yaklaşık 1,8 metre". Boyu bilinen nesnelerle
+    kendini kalibre eder, internetsiz çalışır (~1 sn/kare).
+
 JÜRİ PANELİ (sunum için): http://<pi-ip>:8080/ — kamera + YOLO kutuları, sensör
     grafiği, konuşma dökümü, eşya hafızası, harita, gecikme ölçümleri.
 
@@ -62,17 +68,16 @@ import asyncio
 import edge_tts
 import numpy as np
 import sounddevice as sd
-from PIL import Image
 from queue import Queue
 from collections import deque
 from picamera2 import Picamera2
-from transformers import pipeline
 from dotenv import load_dotenv
 import anlatici
 import goru
 import guvenlik
 import hafiza
 import kontrol
+import mesafe
 import navigasyon
 import panel
 import sesli_komut
@@ -99,7 +104,6 @@ MODEL_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAM
 GEMINI_HEADERS = {"x-goog-api-key": API_KEY}
 
 HTTP_TIMEOUT = 25
-DEPTH_CALIBRATION = 1.0
 
 # Telefon GPS'i gelene kadar kullanılan sabit test konumu (Denizli)
 TEST_KONUMU = (37.73831482466314, 29.10723965422727)
@@ -141,35 +145,6 @@ guvenlik_sistemi = guvenlik.GuvenlikSistemi(ses=ses_yoneticisi).baslat()
 
 # Sesli ayar komutları için Türkçe vosk modeli, açılışı geciktirmemek için arka planda yüklenir
 komut_tanici = sesli_komut.KomutTanici().yukle_arkaplanda()
-
-# ───────────────── DEPTH MODEL ─────────────────
-DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
-
-
-def load_depth_model():
-    """
-    Önce diskteki önbellekten yükler (internet gerekmez). Önbellekte yoksa
-    internetten indirir. İkisi de olmazsa None döner: program çökmez, sadece
-    mesafe tahmini olmadan çalışır.
-    """
-    from huggingface_hub import snapshot_download
-    try:
-        local_dir = snapshot_download(DEPTH_MODEL_ID, local_files_only=True)
-        return pipeline(task="depth-estimation", model=local_dir, device=-1)
-    except Exception as e:
-        print(f"  Önbellekten yüklenemedi ({type(e).__name__}), internetten deneniyor...")
-    try:
-        return pipeline(task="depth-estimation", model=DEPTH_MODEL_ID, device=-1)
-    except Exception as e:
-        print(f"⚠️  DEPTH MODELİ YÜKLENEMEDİ, mesafe tahmini kapalı: {type(e).__name__}: {e}")
-        return None
-
-
-print("DEPTH MODELİ YÜKLENİYOR...")
-depth_pipe = load_depth_model()
-if depth_pipe is not None:
-    print("DEPTH MODELİ HAZIR")
-
 
 # ───────────────── CAMERA ─────────────────
 class Camera:
@@ -338,46 +313,6 @@ def setup_raw_terminal():
 def restore_terminal():
     if _old_term_settings is not None:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term_settings)
-
-
-# ───────────────── DEPTH ESTIMATION ─────────────────
-def estimate_depth(frame_rgb):
-    if depth_pipe is None:
-        return None
-    try:
-        t0 = time.time()
-        small = cv2.resize(frame_rgb, (256, 192))
-        pil_img = Image.fromarray(small)
-        result = depth_pipe(pil_img)
-        if "predicted_depth" in result:
-            depth_map = np.array(result["predicted_depth"])
-        else:
-            depth_map = np.array(result["depth"])
-        elapsed = time.time() - t0
-        print(f"  🔍 Depth: {elapsed:.1f}s")
-
-        h, w = depth_map.shape
-        top_cut = int(h * 0.30)
-        bottom_cut = int(h * 0.65)
-        roi = depth_map[top_cut:bottom_cut, :]
-
-        def median_of_closest(region, percent=0.30):
-            flat = region.flatten()
-            flat = flat[flat > 0.1]
-            flat = flat[flat < 15.0]
-            if len(flat) == 0:
-                return 5.0
-            s = np.sort(flat)
-            cutoff = max(1, int(len(s) * percent))
-            return float(np.median(s[:cutoff]))
-
-        left = median_of_closest(roi[:, :w // 3]) * DEPTH_CALIBRATION
-        center = median_of_closest(roi[:, w // 3:2 * w // 3]) * DEPTH_CALIBRATION
-        right = median_of_closest(roi[:, 2 * w // 3:]) * DEPTH_CALIBRATION
-        return {"left": left, "center": center, "right": right}
-    except Exception as e:
-        print(f"DEPTH ERROR: {type(e).__name__}: {e}")
-        return None
 
 
 # ───────────────── GEMINI İSTEĞİ ─────────────────
@@ -616,6 +551,50 @@ def yolo_esya_gordu(sinif, kutu, digerleri, genislik):
     esya_hafizasi.kaydet(hafiza.YOLO_ESYA[sinif], hafiza.yolo_konum_tarifi(kutu, digerleri, genislik), "yolo")
 
 
+# ───────────────── MESAFE (sensör + kamera derinlik yapay zekâsı) ─────────────────
+kamera_mesafe = None  # main() içinde kurulur
+
+
+def en_yakin_mesafe():
+    """(mesafe_m, kaynak): önce lazer sensör, yoksa kamera tahmini; hiçbiri yoksa (None, None)."""
+    if not guvenlik_sistemi.sensor_kapali and not guvenlik_sistemi.sensor_thread.arizali:
+        return guvenlik_sistemi.son_mesafe, "sensör"
+    o = kamera_mesafe.guncel() if kamera_mesafe else None
+    if o is not None:
+        return o["tam_on"], "kamera"
+    return None, None
+
+
+def mesafe_bilgisi_metni(_sensor_m=None):
+    """Yapay zekâya verilen mesafe bilgisi: lazer sensör (kesin) + kamera tahmini (yaklaşık)."""
+    parcalar = []
+    if not guvenlik_sistemi.sensor_kapali and not guvenlik_sistemi.sensor_thread.arizali:
+        m = guvenlik_sistemi.son_mesafe
+        parcalar.append("Lazer sensör (kesin): tam önde 2 metre içinde engel yok." if m is None else
+                        f"Lazer sensör (kesin): tam öndeki nesne {m:.1f} metre.".replace(".", ",", 1))
+    if kamera_mesafe is not None:
+        parcalar.append(kamera_mesafe.ozet_metni())
+    return " ".join(p for p in parcalar if p)
+
+
+def kamera_uyarisi(seviye, metin):
+    """Sensör yokken kameranın kaba yaklaşma uyarısı (sokak modu)."""
+    if not guvenlik_sistemi.sensor_kapali:
+        return  # sensör varsa uyarıyı o verir
+    print(f"📐 {'DUR' if seviye == 'dur' else 'Dikkat'} — {metin}")
+    yayinla("uyari", f"{'DUR' if seviye == 'dur' else 'Dikkat'} ({metin})")
+    if seviye == "dur":
+        ses_yoneticisi.acil_cal(guvenlik.ses_yolu("bip_dur"))
+        guvenlik_sistemi.titresim.titret(1.0, 0.4)
+    else:
+        def tiklar():
+            for _ in range(3):
+                ses_yoneticisi.tik(0.8)
+                guvenlik_sistemi.titresim.titret(0.7, 0.06)
+                time.sleep(0.18)
+        threading.Thread(target=tiklar, daemon=True).start()
+
+
 # ───────────────── NAVİGASYON ─────────────────
 navigator = None  # main() içinde kurulur
 
@@ -642,37 +621,28 @@ def _duzey_kurali():
     return "Tek cümle, en fazla 12 kelime. "
 
 
-def _mesafe_bilgisi(sensor_m, derinlik):
-    parcalar = []
-    if sensor_m is not None:
-        parcalar.append(
-            f"Lazer sensör tam öndeki (saat 12) nesneye {sensor_m:.1f} metre ölçtü, bu kesin bilgidir. ")
-    else:
-        parcalar.append("Lazer sensör tam önde 2 metre içinde bir şey ölçmedi. ")
-    if derinlik:
-        parcalar.append(
-            f"Kamera derinlik tahmini (yaklaşık): sol {derinlik['left']:.1f} m, "
-            f"orta {derinlik['center']:.1f} m, sağ {derinlik['right']:.1f} m. ")
-    parcalar.append("Bunlar dışında mesafe uydurma. Mesafe söylerken ondalığı virgülle yaz (1,5 metre). ")
-    return "".join(parcalar)
+def _mesafe_bilgisi():
+    bilgi = mesafe_bilgisi_metni()
+    return (bilgi + " " if bilgi else "") + \
+        "Bunlar dışında mesafe uydurma. Mesafe söylerken ondalığı virgülle yaz (1,5 metre). "
 
 
-def istem_tarif(sensor_m, derinlik):
+def istem_tarif():
     return (
         "Sen görme engelli bir kullanıcının gözlüğüsün. Kullanıcı 'önümde ne var' diye sordu. "
         "Türkçe cevap ver. " + _duzey_kurali() +
         "En önemli şeyi önce söyle: yoldaki engel, basamak, kapı, insan, araç. "
-        "Önemsiz eşyaları sayma. " + YON_KURALI + _mesafe_bilgisi(sensor_m, derinlik) +
+        "Önemsiz eşyaları sayma. " + YON_KURALI + _mesafe_bilgisi() +
         "Görüntü karanlık, bulanık ya da kapalıysa sadece bunu söyle. "
         "Selamlama ve giriş cümlesi yok."
     )
 
 
-def istem_soru(sensor_m):
+def istem_soru():
     return (
         "Sen görme engelli bir kullanıcının gözlüğüsün. Ses kaydında kullanıcının sorusu, "
         "görüntüde önündeki sahne var. Türkçe, net ve doğrudan cevap ver. " + _duzey_kurali() +
-        YON_KURALI + _mesafe_bilgisi(sensor_m, None) +
+        YON_KURALI + _mesafe_bilgisi() +
         "Yazı, etiket, ilaç kutusu ya da para soruluyorsa okuyup söyle. "
         "'Ne görüyorsun' gibi isteklerde en fazla 5 cümleyle zengin anlat. "
         "Selamlama ve giriş cümlesi yok.\n"
@@ -699,8 +669,8 @@ def kare_al(cam, boyut=(480, 360), kalite=60):
 
 # ───────────────── SENSÖRE DAYALI İNTERNETSİZ CEVAP ─────────────────
 def sensorle_cevapla():
-    """İnternet ya da yapay zekâ yokken: sadece lazer sensörün ölçtüğünü söyler."""
-    m = guvenlik_sistemi.son_mesafe
+    """İnternet ya da yapay zekâ yokken: sensörün ya da kameranın (cihazda çalışır) ölçtüğünü söyler."""
+    m, kaynak = en_yakin_mesafe()
     if m is None:
         ad = "engel_yok"
     elif m < 0.75:
@@ -711,8 +681,8 @@ def sensorle_cevapla():
         ad = "engel_bir_bucuk"
     else:
         ad = "engel_iki"
-    print(f"📏 Sensörle cevap: {'menzil dışı' if m is None else f'{m:.2f} m'}")
-    yayinla("gozluk", f"(internetsiz, sensör) {'2 metre içinde engel yok' if m is None else f'{m:.1f} m'}")
+    print(f"📏 İnternetsiz cevap ({kaynak}): {'menzil dışı' if m is None else f'{m:.2f} m'}")
+    yayinla("gozluk", f"(internetsiz, {kaynak}) {'2 metre içinde engel yok' if m is None else f'{m:.1f} m'}")
     oynat(guvenlik.ses_yolu(ad))
 
 
@@ -726,12 +696,9 @@ def onumde_ne_var(cam):
         print("⚠️ Görüntü yok")
         sensorle_cevapla()
         return
-    sensor_m = guvenlik_sistemi.son_mesafe
-    # Derinlik tahmini ~5 sn sürüyor, sadece detaylı düzeyde
-    derinlik = estimate_depth(frame) if ayarlar.get("konusma_duzeyi") == DUZEY_DETAYLI else None
     payload = {
         "contents": [{"parts": [
-            {"text": istem_tarif(sensor_m, derinlik)},
+            {"text": istem_tarif()},
             {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
         ]}],
         "generationConfig": {"maxOutputTokens": 120, "temperature": 0.2},
@@ -774,7 +741,7 @@ def soruyu_isle(cam, wav_yolu):
     _, img_b64 = kare_al(cam)
     with open(wav_yolu, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-    parts = [{"text": istem_soru(guvenlik_sistemi.son_mesafe)}]
+    parts = [{"text": istem_soru()}]
     if img_b64:
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
     parts.append({"inline_data": {"mime_type": "audio/wav", "data": audio_b64}})
@@ -826,9 +793,15 @@ def _mesafe_metni(m):
 
 
 def arac_mesafe_olc():
-    if guvenlik_sistemi.sensor_thread.arizali:
-        return {"sonuc": "Mesafe sensörü şu an çalışmıyor, mesafe bilinmiyor."}
-    return {"tam_on": _mesafe_metni(guvenlik_sistemi.son_mesafe)}
+    sonuc = {}
+    if not guvenlik_sistemi.sensor_kapali and not guvenlik_sistemi.sensor_thread.arizali:
+        sonuc["lazer_sensor_tam_on"] = _mesafe_metni(guvenlik_sistemi.son_mesafe) + " (kesin)"
+    o = kamera_mesafe.guncel() if kamera_mesafe else None
+    if o is not None:
+        sonuc["kamera_tam_on"] = f"yaklaşık {_mesafe_metni(o['tam_on'])}"
+        sonuc["kamera_nesneler"] = [f"{n['ad']}: saat {n['saat']} yönünde, yaklaşık {_mesafe_metni(n['mesafe'])}"
+                                    for n in o["nesneler"][:6]]
+    return sonuc or {"sonuc": "Şu an mesafe ölçülemiyor."}
 
 
 def arac_ayar_degistir(duzey):
@@ -945,7 +918,8 @@ def canli_kur():
                      "cevreyi_tara": arac_cevreyi_tara, "navigasyon_baslat": arac_navigasyon_baslat,
                      "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim},
             kare_al=kare_jpeg, duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA),
-            mod_al=mod, son_ses_ayarla=son_ses_ayarla, yayinla=yayinla, olcum=olcum).baslat()
+            mod_al=mod, son_ses_ayarla=son_ses_ayarla, yayinla=yayinla, olcum=olcum,
+            mesafe_bilgisi=mesafe_bilgisi_metni).baslat()
         print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}), bağlı değilken REST")
     except Exception as e:
         print(f"⚠️  Gemini Live başlatılamadı, REST kullanılıyor: {type(e).__name__}: {e}")
@@ -967,8 +941,16 @@ def panel_karesi():
     kare = cv2.resize(kare, (640, 480))
     if nesne_tanima is not None:
         kare = nesne_tanima.ciz(kare)  # kamera 640 × 480 veriyor, YOLO kutuları aynı ölçekte
-    m = guvenlik_sistemi.son_mesafe
-    yazi = f"{'EV' if mod() == MOD_EV else 'SOKAK'} | sensor: {'>2 m' if m is None else f'{m:.2f} m'}"
+    o = kamera_mesafe.guncel() if kamera_mesafe else None
+    if o is not None:
+        for n in o["nesneler"]:
+            x1, y1, x2, y2 = n["kutu"]
+            etiket = f"{n['mesafe']:.1f} m"
+            cv2.rectangle(kare, (x1, y2 - 20), (x1 + 62, y2), (20, 20, 20), -1)
+            cv2.putText(kare, etiket, (x1 + 4, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 220, 255), 1)
+    m, kaynak = en_yakin_mesafe()
+    yazi = (f"{'EV' if mod() == MOD_EV else 'SOKAK'} | tam onde: {'>2 m' if m is None else f'{m:.2f} m'}"
+            f" ({'lazer' if kaynak == 'sensör' else 'kamera AI' if kaynak else '-'})")
     cv2.rectangle(kare, (0, 0), (640, 26), (0, 0, 0), -1)
     cv2.putText(kare, yazi, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
     _, buf = cv2.imencode(".jpg", kare, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -979,11 +961,20 @@ def panel_besleyici():
     """Sensör, YOLO ve "Dur" uyarılarını panele aktarır; "Dur" anındaki TTC'yi ölçüm olarak yazar."""
     son_dur = guvenlik_sistemi.sayac[guvenlik.OLAY_DUR]
     son_yolo = 0.0
+    son_derinlik = 0.0
     sayac = 0
     while True:
         try:
             mt = guvenlik_sistemi.mantik
-            yayinla("sensor", {
+            o = kamera_mesafe.guncel() if kamera_mesafe else None
+            if o is not None and o["zaman"] != son_derinlik:
+                son_derinlik = o["zaman"]
+                yayinla("mesafe", {k: o[k] for k in ("tam_on", "nesneler", "olcek", "model", "sure_ms")})
+            if guvenlik_sistemi.sensor_kapali:
+                yayinla("sensor", {"mesafe": None if o is None else o["tam_on"], "hiz": 0.0, "ttc": None,
+                                   "seviye": 0, "arizali": False, "kaynak": "kamera (derinlik AI)"})
+            else:
+                yayinla("sensor", {
                 "mesafe": guvenlik_sistemi.son_mesafe, "hiz": mt.hiz,
                 "ttc": None if mt.ttc == float("inf") else mt.ttc, "seviye": mt.seviye,
                 "arizali": guvenlik_sistemi.sensor_thread.arizali, "kaynak": guvenlik_sistemi.sensor.ad})
@@ -1077,17 +1068,22 @@ def keyboard_loop():
 
 # ───────────────── MAIN ─────────────────
 def main():
-    global cam, juri_paneli, navigator, nesne_tanima
+    global cam, juri_paneli, navigator, nesne_tanima, kamera_mesafe
     print("SYSTEM STARTING...")
     cam = Camera().start()
     navigator = navigasyon.Navigasyon(
         duyur=navigasyon_duyur, google_anahtari=GOOGLE_MAPS_API_KEY or None,
         degisti=lambda d: yayinla("nav", d), yedek_konum=TEST_KONUMU)
     juri_paneli = panel.Panel(kare_al=panel_karesi, durum_al=durum_ozeti,
-                              konum_geldi=navigator.konum_guncelle).baslat()
+                              konum_geldi=navigator.konum_guncelle,
+                              harita_al=lambda: kamera_mesafe.harita_jpeg() if kamera_mesafe else None).baslat()
     if goru.YOLO_ACIK:
         nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
         nesne_tanima.start()
+    kamera_mesafe = mesafe.KameraMesafe(
+        kare_al=cam.get, mod_al=mod, tespitler_al=lambda: nesne_tanima.son if nesne_tanima else [],
+        uyari=kamera_uyarisi)
+    kamera_mesafe.start()
     canli_kur()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
     dugme.baslat()
