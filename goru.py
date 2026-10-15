@@ -99,12 +99,13 @@ class NesneTanima(threading.Thread):
                 if sinif in ("cell phone", "laptop"):
                     self.esya_gordu(sinif, kutu, digerleri, w)
 
-    def ciz(self, kare_bgr):
-        """Son tespitleri BGR karenin üstüne çizer (panel için). 2 sn'den eskiyse çizmez."""
+    def ciz(self, kare_bgr, olcek=1.0):
+        """Son tespitleri BGR karenin üstüne çizer (panel için). 2 sn'den eskiyse çizmez.
+        olcek: kutular kamera çözünürlüğünde, çizilen kare küçültülmüşse oranı."""
         if time.time() - self.son_zaman > 2.0:
             return kare_bgr
         for ad, _, guven, (x1, y1, x2, y2) in self.son:
-            p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
+            p1, p2 = (int(x1 * olcek), int(y1 * olcek)), (int(x2 * olcek), int(y2 * olcek))
             cv2.rectangle(kare_bgr, p1, p2, (40, 220, 120), 2)
             etiket = f"{_ascii(ad)} {guven:.0%}"
             (tw, th), _ = cv2.getTextSize(etiket, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)

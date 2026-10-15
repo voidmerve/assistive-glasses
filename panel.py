@@ -2,6 +2,9 @@
 Asistif Gözlük - Jüri Paneli ve Telefon Konum Sayfası
 =====================================================
 
+Telefon sayfası iki iş görür: konumu gönderir ve fiziksel düğme gelene kadar kumanda
+olur (önümde ne var, basılı tutup konuş, tekrar, ev/sokak modu).
+
 Görme engelli kullanıcıyı etkilemeyen, sunumda jüri ve izleyici için canlı ekran:
 kamera görüntüsü + YOLO kutuları, sensör mesafesi ve çarpışma süresi grafiği,
 gözlüğün duyduğu ve söylediği her cümle, eşya hafızası, navigasyon haritası,
@@ -74,8 +77,11 @@ class Panel:
     konum_geldi: f(lat, lon, dogruluk) → navigasyona
     """
 
-    def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None):
+    DUGME_OLAYLARI = {"kisa", "uzun_basladi", "uzun_bitti", "cift", "ev", "sokak"}
+
+    def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None, dugme_olayi=None):
         self.kare_al, self.durum_al, self.konum_geldi = kare_al, durum_al, konum_geldi
+        self.dugme_olayi = dugme_olayi  # telefondaki kumanda düğmeleri → f(olay)
         self.harita_al = harita_al or (lambda: None)  # renkli derinlik haritası (JPEG)
         self._abonelar = []
         self._kilit = threading.Lock()
@@ -163,6 +169,14 @@ class Panel:
             return Response(akis(), mimetype="text/event-stream",
                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+        @app.route("/api/dugme", methods=["POST"])
+        def dugme():
+            olay = (request.get_json(force=True, silent=True) or {}).get("olay")
+            if olay not in self.DUGME_OLAYLARI or self.dugme_olayi is None:
+                return jsonify({"hata": "geçersiz olay"}), 400
+            self.dugme_olayi(olay)
+            return jsonify({"tamam": True})
+
         @app.route("/api/konum", methods=["POST"])
         def konum():
             v = request.get_json(force=True, silent=True) or {}
@@ -229,7 +243,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td{padding:3px 0;border
 <span class="rozet">Yapay zekâ: <b id="ai">—</b></span>
 <span class="rozet">İnternet: <b id="net">—</b></span>
 <span class="rozet">Sensör: <b id="sensor">—</b></span>
-<span class="rozet">Konuşma: <b id="duzey">—</b></span></header>
+<span class="rozet">Konuşma: <b id="duzey">—</b></span>
+<span class="rozet">Gözcü: <b id="gozcu">—</b></span></header>
 <main>
 <div class="sutun">
  <div class="kart"><h2>Gözlüğün gördüğü (YOLO, cihaz üstünde)</h2><img id="video" src="/video" alt="kamera">
@@ -279,7 +294,8 @@ function grafikCiz(){const c=$("grafik"),g=c.getContext("2d"),W=c.width,H=c.heig
 function isle(m){const v=m.veri;switch(m.tur){
  case"durum":rozet("mod",v.mod==="home"?"Ev":"Sokak");rozet("ai",v.ai,v.ai&&v.ai.startsWith("Live"));
   rozet("net",v.internet?"var":"yok",v.internet);rozet("duzey",v.duzey+(v.mod!=="home"?` · anlatıcı ${v.siklik}`:""));
-  if(v.hafiza){hafiza=v.hafiza;esyaCiz()}if(v.nav)navCiz(v.nav);break;
+  if(v.hafiza){hafiza=v.hafiza;esyaCiz()}if(v.nav)navCiz(v.nav);
+  if(v.gozcu)rozet("gozcu",`${v.gozcu.gozcu} kare · ${v.gozcu.bildir} bildirim · ${v.gozcu.esya_kaydet} eşya`);break;
  case"sensor":$("mesafe").textContent=v.mesafe==null?"> 2 m":v.mesafe.toFixed(2)+" m";
   $("seviye").textContent=["","YAKLAŞIYOR","DUR"][v.seviye];$("seviye").style.color=["","#f5d90a","#e5484d"][v.seviye];
   $("sensorbaslik").textContent=v.kaynak&&v.kaynak.startsWith("kamera")?"Mesafe (sensör yok: kameradan)":"Lazer mesafe sensörü";
@@ -304,30 +320,61 @@ setInterval(()=>fetch("/durum").then(r=>r.json()).then(v=>isle({tur:"durum",veri
 </script></body></html>"""
 
 TELEFON_HTML = r"""<!doctype html>
-<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Gözlük Konum</title>
+<html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Gözlük Kumanda</title>
 <style>
-:root{--bg:#0f1115;--yazi:#e8eaf0;--soluk:#8b93a5;--yesil:#30a46c;--kirmizi:#e5484d}
-body{margin:0;background:var(--bg);color:var(--yazi);font:18px/1.5 system-ui,-apple-system,sans-serif;padding:20px 16px;text-align:center}
-button{font-size:22px;padding:22px;width:100%;border-radius:16px;border:0;background:var(--yesil);color:#fff;font-weight:700}
-#durum{font-size:20px;margin:20px 0}#ayrinti{color:var(--soluk);font-size:15px}
+:root{--bg:#0f1115;--kart:#181b22;--yazi:#e8eaf0;--soluk:#8b93a5;--yesil:#30a46c;--kirmizi:#e5484d;--mavi:#3e8ef7;--mor:#8e4ec6}
+*{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--yazi);font:17px/1.4 system-ui,-apple-system,sans-serif;padding:16px;text-align:center}
+h1{font-size:20px;margin:4px 0 12px}
+button{font:inherit;font-weight:700;border:0;border-radius:16px;color:#fff;width:100%;touch-action:none}
+.izgara{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+.buyuk{grid-column:1/3;padding:26px;font-size:22px}
+.orta{padding:20px}
+#onumde{background:var(--yesil)}#konus{background:var(--mavi)}#konus.basili{background:var(--kirmizi)}
+#tekrar{background:#3a3f4b}#ev,#sokak{background:var(--mor)}
+#konum{background:#2a2f3a;padding:16px;margin-top:6px}
+#durum,#gps{font-size:14px;color:var(--soluk);margin-top:8px;min-height:20px}
 </style></head><body>
-<h1>Gözlük konum paylaşımı</h1>
-<button id="dugme">Konumu paylaşmaya başla</button>
-<div id="durum">Henüz başlamadı</div><div id="ayrinti"></div>
+<h1>Gözlük kumandası</h1>
+<div class="izgara">
+ <button id="onumde" class="buyuk">Önümde ne var?</button>
+ <button id="konus" class="buyuk">Basılı tut ve konuş</button>
+ <button id="tekrar" class="orta">Tekrar</button>
+ <button id="ev" class="orta">Ev modu</button>
+ <button id="sokak" class="orta" style="grid-column:1/3">Sokak modu</button>
+</div>
+<div id="durum">&nbsp;</div>
+<button id="konum">Konumu paylaşmaya başla (navigasyon için)</button>
+<div id="gps"></div>
 <script>
+const $=id=>document.getElementById(id);
+function gonder(olay){return fetch("/api/dugme",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({olay})})
+ .then(r=>{$("durum").textContent=r.ok?"✓ "+olay:"Gözlük cevap vermedi"}).catch(()=>{$("durum").textContent="Gözlüğe ulaşılamıyor"})}
+function titret(ms){if(navigator.vibrate)navigator.vibrate(ms)}
+$("onumde").onclick=()=>{titret(30);gonder("kisa")};
+$("tekrar").onclick=()=>{titret(30);gonder("cift")};
+$("ev").onclick=()=>{titret(30);gonder("ev")};
+$("sokak").onclick=()=>{titret(30);gonder("sokak")};
+// Basılı tut ve konuş: parmak kalkınca, kaydırınca ya da sayfa gizlenince kayıt biter
+let basili=false;
+function bas(e){e.preventDefault();if(basili)return;basili=true;$("konus").classList.add("basili");$("konus").textContent="Dinliyorum… bırakınca biter";titret(40);gonder("uzun_basladi")}
+function birak(e){if(e)e.preventDefault();if(!basili)return;basili=false;$("konus").classList.remove("basili");$("konus").textContent="Basılı tut ve konuş";titret(20);gonder("uzun_bitti")}
+const k=$("konus");k.addEventListener("pointerdown",bas);["pointerup","pointercancel","pointerleave"].forEach(o=>k.addEventListener(o,birak));
+k.addEventListener("contextmenu",e=>e.preventDefault());
+document.addEventListener("visibilitychange",()=>{if(document.hidden)birak()});
+// Konum paylaşımı
 let izleyici=null,kilit=null,sayac=0;
 async function ekranAcik(){try{kilit=await navigator.wakeLock.request("screen")}catch(e){}}
-document.getElementById("dugme").onclick=()=>{
- if(!navigator.geolocation){durum("Bu tarayıcı konum vermiyor",1);return}
- if(izleyici!==null)return;ekranAcik();durum("Konum izni bekleniyor…");
+$("konum").onclick=()=>{
+ if(!navigator.geolocation){$("gps").textContent="Bu tarayıcı konum vermiyor";return}
+ if(izleyici!==null)return;ekranAcik();$("gps").textContent="Konum izni bekleniyor…";
  izleyici=navigator.geolocation.watchPosition(p=>{const c=p.coords;sayac++;
   fetch("/api/konum",{method:"POST",headers:{"Content-Type":"application/json"},
-   body:JSON.stringify({lat:c.latitude,lon:c.longitude,dogruluk:c.accuracy})})
-   .then(r=>durum(r.ok?"Konum gözlüğe gidiyor ✓":"Gözlük cevap vermedi",!r.ok)).catch(()=>durum("Gözlüğe ulaşılamıyor",1));
-  document.getElementById("ayrinti").textContent=`Doğruluk ±${Math.round(c.accuracy)} m · gönderilen: ${sayac}`},
-  e=>durum("Konum alınamadı: "+e.message,1),{enableHighAccuracy:true,maximumAge:1000,timeout:15000});
- document.getElementById("dugme").textContent="Paylaşılıyor (sayfayı açık tut)"};
-function durum(m,hata){const d=document.getElementById("durum");d.textContent=m;d.style.color=hata?"#e5484d":"#30a46c"}
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")ekranAcik()});
+   body:JSON.stringify({lat:c.latitude,lon:c.longitude,dogruluk:c.accuracy})}).catch(()=>{});
+  $("gps").textContent=`Konum gidiyor ✓ ±${Math.round(c.accuracy)} m · ${sayac}`},
+  e=>{$("gps").textContent="Konum alınamadı: "+e.message},{enableHighAccuracy:true,maximumAge:1000,timeout:15000});
+ $("konum").textContent="Konum paylaşılıyor (sayfayı açık tut)"};
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&izleyici!==null)ekranAcik()});
 </script></body></html>"""

@@ -150,8 +150,11 @@ komut_tanici = sesli_komut.KomutTanici().yukle_arkaplanda()
 class Camera:
     def __init__(self):
         self.picam2 = Picamera2()
+        # 1280 × 960: anahtar ve cüzdan gibi küçük eşyalar Gemini'ye giden karede seçilebilsin.
+        # Kamera bu boyutta da saniyede ~15 kare veriyor; YOLO ve derinlik kendileri küçültüyor.
+        boyut = (int(os.getenv("KAMERA_GENISLIK") or 1280), int(os.getenv("KAMERA_YUKSEKLIK") or 960))
         self.picam2.configure(self.picam2.create_preview_configuration(
-            main={"format": "RGB888", "size": (640, 480)}
+            main={"format": "RGB888", "size": boyut}
         ))
         self.frame = None
         self.lock = threading.Lock()
@@ -490,6 +493,7 @@ def durum_ozeti():
         "ai": ("Live (bağlı)" if canli_hazir() else "Live (bağlanıyor)") if canli is not None else "REST",
         "hafiza": esya_hafizasi.liste(),
         "nav": nav_durum,
+        "gozcu": dict(canli.sayac) if canli is not None else None,
     }
 
 
@@ -548,7 +552,10 @@ def yolo_esya_gordu(sinif, kutu, digerleri, genislik):
     """YOLO telefon ya da bilgisayar gördü: ev modunda yerini internetsiz kaydet."""
     if mod() != MOD_EV:
         return
-    esya_hafizasi.kaydet(hafiza.YOLO_ESYA[sinif], hafiza.yolo_konum_tarifi(kutu, digerleri, genislik), "yolo")
+    tarif = hafiza.yolo_konum_tarifi(kutu, digerleri, genislik)
+    # "sol tarafta" gibi sadece yöne bağlı tarif sonradan işe yaramaz: yüzey ya da yakında bir eşya şart
+    if "üzerinde" in tarif or "yanında" in tarif:
+        esya_hafizasi.kaydet(hafiza.YOLO_ESYA[sinif], tarif, "yolo")
 
 
 # ───────────────── MESAFE (sensör + kamera derinlik yapay zekâsı) ─────────────────
@@ -890,9 +897,10 @@ def arac_neredeyim():
 
 
 def kare_jpeg():
+    """Live'a giden kare: 960 × 720, küçük eşyalar seçilebilsin."""
     if cam is None:
         return None
-    _, b64 = kare_al(cam)
+    _, b64 = kare_al(cam, boyut=(960, 720), kalite=75)
     return None if b64 is None else base64.b64decode(b64)
 
 
@@ -938,13 +946,14 @@ def panel_karesi():
     kare = cam.get()
     if kare is None:
         return None
+    olcek = 640 / kare.shape[1]  # kutular kamera çözünürlüğünde, panel karesi 640 × 480
     kare = cv2.resize(kare, (640, 480))
     if nesne_tanima is not None:
-        kare = nesne_tanima.ciz(kare)  # kamera 640 × 480 veriyor, YOLO kutuları aynı ölçekte
+        kare = nesne_tanima.ciz(kare, olcek)
     o = kamera_mesafe.guncel() if kamera_mesafe else None
     if o is not None:
         for n in o["nesneler"]:
-            x1, y1, x2, y2 = n["kutu"]
+            x1, y1, x2, y2 = (int(v * olcek) for v in n["kutu"])
             etiket = f"{n['mesafe']:.1f} m"
             cv2.rectangle(kare, (x1, y2 - 20), (x1 + 62, y2), (20, 20, 20), -1)
             cv2.putText(kare, etiket, (x1 + 4, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 220, 255), 1)
@@ -1048,6 +1057,12 @@ def olay_geldi(olay):
 dugme = kontrol.Dugme(olay_geldi)
 
 
+def telefon_dugmesi(olay):
+    """Telefondaki kumanda düğmeleri (fiziksel düğme gelene kadar). Ağ thread'inden çağrılır."""
+    print(f"📱 Telefon: {olay}")
+    olay_geldi(olay)  # hızlı döner; uzun basışın başı ve sonu sırası korunsun diye thread'e atılmaz
+
+
 def keyboard_loop():
     """stdin'den tek tuş okuyup düğme olayına çeviren daemon döngü (h / s: mod)."""
     while True:
@@ -1076,7 +1091,8 @@ def main():
         degisti=lambda d: yayinla("nav", d), yedek_konum=TEST_KONUMU)
     juri_paneli = panel.Panel(kare_al=panel_karesi, durum_al=durum_ozeti,
                               konum_geldi=navigator.konum_guncelle,
-                              harita_al=lambda: kamera_mesafe.harita_jpeg() if kamera_mesafe else None).baslat()
+                              harita_al=lambda: kamera_mesafe.harita_jpeg() if kamera_mesafe else None,
+                              dugme_olayi=telefon_dugmesi).baslat()
     if goru.YOLO_ACIK:
         nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
         nesne_tanima.start()

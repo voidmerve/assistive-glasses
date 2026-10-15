@@ -19,3 +19,5 @@ tasarim/__pycache__/
 !anlatici.py
 !panel.py
 !mesafe.py
+!servis/
+!servis/**

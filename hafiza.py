@@ -17,6 +17,7 @@ Sorulunca: "Anahtarını en son 10 dakika önce masanın üzerinde, sol tarafta 
 
 import json
 import os
+import re
 import threading
 import time
 
@@ -92,6 +93,10 @@ class EsyaHafizasi:
         ad = esya_adi(esya)
         konum = (konum or "").strip().rstrip(".")
         if ad is None or not konum:
+            return False
+        # Bakış yönüne bağlı tarif ("saat 11 yönünde", "önünde") sonradan işe yaramaz
+        if re.fullmatch(r"(saat \d+ yönünde|tam önünde|önünde|sol tarafta|sağ tarafta|solunda|sağında)", konum.lower()):
+            print(f"🧠 Hafıza: '{konum}' bir yer tarifi değil, kaydedilmedi")
             return False
         simdi = self.saat()
         with self._kilit:

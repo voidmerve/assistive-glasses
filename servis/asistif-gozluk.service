@@ -1,0 +1,22 @@
+# Asistif Gözlük — systemd kullanıcı servisi
+# SSH bağlantısından bağımsız çalışır: Pi cepteyken SSH koparsa program kapanmaz.
+# Kurulum ve kullanım: servis/kur.sh dosyasının başına bak.
+[Unit]
+Description=Asistif Gözlük (son_mapli.py)
+After=pipewire.service wireplumber.service network-online.target
+Wants=pipewire.service
+
+[Service]
+WorkingDirectory=%h/Desktop/Gemını
+ExecStart=/usr/bin/python3 -u son_mapli.py
+Environment=PYTHONUNBUFFERED=1
+# Çıktı proje klasöründeki gozluk.log dosyasına (her başlatmada sıfırlanır):
+#   tail -f ~/Desktop/Gemını/gozluk.log
+StandardOutput=truncate:%h/Desktop/Gemını/gozluk.log
+StandardError=inherit
+# Çökerse 5 sn sonra yeniden başlar
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

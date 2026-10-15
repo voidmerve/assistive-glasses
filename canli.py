@@ -105,9 +105,13 @@ OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Ta
   numarası, çukur, açık kapak, yola park etmiş araç. tur="yer": eczane, market, fırın, durak, banka,
   okunabilen tabela ya da dükkân adı. Metin tek kısa cümle, saat yönüyle, mesafe biliniyorsa onunla.
   Önemli bir şey yoksa fonksiyon çağırma. Önceki gözcü mesajlarında bildirdiğini tekrar bildirme.
-- "EV GÖZCÜSÜ": Karede anahtar, cüzdan, telefon ya da bilgisayar görüyorsan her biri için esya_kaydet
-  çağır. Konum kısa ve yer belirten olsun: "masanın üzerinde, sol tarafta", "kanepenin sağ köşesinde",
-  "mutfak tezgâhında, ekmek kutusunun yanında". Görmüyorsan fonksiyon çağırma.
+- "EV GÖZCÜSÜ": Kareye dikkatle bak; küçük eşyaları da ara. Anahtar: tek anahtar, anahtar demeti,
+  anahtarlık, kapı kartı. Cüzdan: deri ya da kumaş cüzdan, kartlık, para çantası. Ayrıca telefon ve
+  bilgisayar (dizüstü, tablet değil). Gördüğün her biri için esya_kaydet çağır.
+  KONUM KURALI: Konumu odadaki sabit bir şeye göre tarif et, çünkü kullanıcı sonra başka yöne bakarken
+  soracak: "koltuğun üzerinde, sağ kolçağın yanında", "yemek masasında, meyve kasesinin yanında",
+  "kapının yanındaki dolabın üstünde". ASLA saat yönü, "önünde", "solunda", "karşında" gibi bakış
+  yönüne bağlı ifadeler kullanma. Emin değilsen ya da görmüyorsan fonksiyon çağırma.
 - "SÖYLE:" ile başlayan mesajda sadece verilen cümleyi aynen söyle, hiçbir şey ekleme.
 - "YÖNLENDİR:" ile başlayan mesajda verilen yönlendirmeyi söyle. Görüntüde dönüş yerini belirleyen
   belirgin bir işaret (dükkân, tabela, durak) varsa kısaca ekle, örneğin "eczanenin önünden".
@@ -136,7 +140,8 @@ def _arac_tanimlari(types):
         f("mod_degistir", "Ev ya da sokak moduna geçer.", {"mod": S(type="STRING", enum=["ev", "sokak"])}),
         f("durum_bildir", "İnternet, sensör, mod, konuşma düzeyi ve navigasyon durumunu döner."),
         f("esya_kaydet", "Ev gözcüsü: görülen eşyanın yerini metin olarak kaydeder (görüntü saklanmaz).",
-          {"esya": esya, "konum": S(type="STRING", description="ör. 'masanın üzerinde, sol tarafta'")}),
+          {"esya": esya, "konum": S(type="STRING", description="Odadaki sabit bir şeye göre, ör. 'koltuğun "
+                                     "üzerinde, sağ kolçağın yanında'. Saat yönü ya da 'önünde' YOK.")}),
         f("esya_nerede", "Eşyanın en son nerede ve ne zaman görüldüğünü döner.", {"esya": esya}),
         f("bildir", "Sokak gözcüsü: önemli bir olay ya da yön bulmaya yarayan bir yer bildirir.",
           {"tur": S(type="STRING", enum=["olay", "yer"]),

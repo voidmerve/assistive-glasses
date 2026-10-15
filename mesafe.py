@@ -35,6 +35,7 @@ Ayarlar (.env):
   KAMERA_DIKEY_FOV=67      # Camera Module 3 Wide dikey görüş açısı (derece)
   KAMERA_UYARI=1
   DERINLIK_MODELI=mod      # mod | ic | dis  (sunum salondaysa: ic)
+  DERINLIK_CARPAN=0.75     # gerçek / gösterilen mesafe (1-2-3 m testiyle bulunur)
 """
 
 import math
@@ -59,6 +60,9 @@ KAMERA_UYARI = (os.getenv("KAMERA_UYARI") or "1").strip() not in ("0", "hayir", 
 # mod: ev → iç mekân, sokak → dış mekân modeli. ic / dis: her zaman o model
 # (sunum salonda yapılacaksa sokak modunda da doğru mesafe için DERINLIK_MODELI=ic)
 DERINLIK_MODELI = (os.getenv("DERINLIK_MODELI") or "mod").strip().lower()
+# Geniş açılı lens (Camera Module 3 Wide) nesneleri küçük gösterir; model eğitildiği kameralara
+# göre mesafeyi büyük tahmin eder. Ölçülen gerçek / gösterilen oranı (ör. 3 m'yi 4 m gösteriyorsa 0,75).
+DERINLIK_CARPAN = _sayi("DERINLIK_CARPAN", 1.0)
 
 MODELLER = {
     "ev": "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
@@ -163,8 +167,8 @@ class KameraMesafe(threading.Thread):
     def _isle(self, kare):
         t0 = time.time()
         h, w = kare.shape[:2]
-        ham = self.derinlik_haritasi(kare)
-        derinlik = ham * self.olcek
+        ham = self.derinlik_haritasi(kare) * DERINLIK_CARPAN  # sabit lens düzeltmesi
+        derinlik = ham * self.olcek                            # + boy kalibrasyonunun ince ayarı
         odak = (h / 2) / math.tan(math.radians(KAMERA_DIKEY_FOV / 2))   # piksel
         yatay_fov = math.degrees(2 * math.atan((w / 2) / odak))
 
