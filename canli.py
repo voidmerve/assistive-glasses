@@ -30,7 +30,8 @@ ana program eski yola (REST + vosk + sensör) döner.
 Ayarlar (.env):
   AI_MOTORU=live          # live ya da rest
   CANLI_MODEL=gemini-3.8-live
-  OLAY_ARALIGI_S=5        # sokak gözcüsü aralığı, 0 = kapalı
+  OLAY_ARALIGI_S=8        # sokak gözcüsü aralığı, 0 = kapalı
+  CANLI_BAGLAM_TOKEN=12000  # oturum geçmişi sınırı: aşınca eski kareler atılır (cevaplar hızlı kalsın)
   ESYA_ARALIGI_S=8        # ev modunda eşya gözcüsü aralığı, 0 = kapalı
 """
 
@@ -56,7 +57,8 @@ def _sayi(ad, varsayilan):
         return varsayilan
 
 
-OLAY_ARALIGI_S = _sayi("OLAY_ARALIGI_S", 5)
+OLAY_ARALIGI_S = _sayi("OLAY_ARALIGI_S", 8)
+BAGLAM_SINIRI = int(_sayi("CANLI_BAGLAM_TOKEN", 12000))  # bunu aşınca eski mesajlar (kareler) atılır
 ESYA_ARALIGI_S = _sayi("ESYA_ARALIGI_S", 8)
 SAHNE_DEGISIM_ESIGI = 10.0   # küçük gri kareler arası ortalama fark (0-255)
 SAHNE_EN_UZUN_S = 60.0       # sahne değişmese de bu kadar sürede bir bak
@@ -166,7 +168,8 @@ class CanliAsistan:
     """
 
     def __init__(self, api_key, ses, araclar, kare_al, duzey_al, mod_al, son_ses_ayarla,
-                 yayinla=None, olcum=None, mesafe_bilgisi=None, model=CANLI_MODEL,
+                 yayinla=None, olcum=None, mesafe_bilgisi=None, gozcu=True, ad="kullanıcı",
+                 mesgul_al=None, model=CANLI_MODEL,
                  olay_araligi=OLAY_ARALIGI_S, esya_araligi=ESYA_ARALIGI_S):
         self.api_key = api_key
         self.ses = ses
@@ -179,6 +182,12 @@ class CanliAsistan:
         self.olcum = olcum or (lambda ad, deger: None)
         # f(sensor_m) → mesafe metni (sensör + kamera derinlik tahmini). Verilmezse sadece sensör.
         self.mesafe_bilgisi = mesafe_bilgisi or self._sensor_metni
+        # İki oturum kullanılır: gözcü kareleri kullanıcı oturumunun geçmişinde birikince
+        # cevaplar 1-2 sn'den 5-15 sn'ye çıkıyordu. gozcu=False: sadece kullanıcıyla konuşur.
+        # gozcu=True ve kullanıcı akışları hiç çağrılmazsa: sadece arka planda bakar, sesi çalınmaz.
+        self.gozcu_acik = gozcu
+        self.ad = ad
+        self.mesgul_al = mesgul_al or (lambda: False)  # diğer oturum konuşurken gözcü beklesin
         self.model = model
         self.olay_araligi = olay_araligi
         self.esya_araligi = esya_araligi
@@ -188,10 +197,11 @@ class CanliAsistan:
         self._kuyruk = None
         self._durdur = threading.Event()
         self._devam_kolu = None
-        self._bekleyen_turlar = deque()  # (tür, gönderim anı), cevap sırasıyla
+        # Gönderilen isteklerin kayıtları, cevap sırasıyla: {"tur", "t0", "atla", "omur"}
+        # omur: bu kadar saniyede cevap başlamazsa kayıt atılır (cevapsız kalan istek sırayı kaydırmasın)
+        self._bekleyen_turlar = deque()
         self._tur = None
         self._son_etkilesim = 0.0
-        self._susturulan_tur_sayisi = 0
         self._giris_yazisi = ""
         self._son_kucuk_kare = None
         self._son_gozcu = 0.0
@@ -248,10 +258,11 @@ class CanliAsistan:
             if tur["oynatici"] is not None:
                 tur["oynatici"].kes()
             susturuldu = True
-        bekleyen_cevap = sum(1 for t, _ in self._bekleyen_turlar if t == TUR_CEVAP)
-        if bekleyen_cevap:
-            susturuldu = True
-            self._susturulan_tur_sayisi = bekleyen_cevap
+        # Sadece ŞU AN bekleyen cevapları işaretle: bundan sonra gönderilecek sorunun cevabı etkilenmez
+        for k in self._bekleyen_turlar:
+            if k["tur"] == TUR_CEVAP and not k["atla"]:
+                k["atla"] = True
+                susturuldu = True
         return susturuldu
 
     def durdur(self):
@@ -280,15 +291,18 @@ class CanliAsistan:
                 input_audio_transcription=types.AudioTranscriptionConfig(),
                 realtime_input_config=types.RealtimeInputConfig(
                     automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)),
+                # Gözcü kareleri oturum geçmişinde birikince model her soruda hepsini yeniden
+                # işliyor, cevaplar 1-2 sn'den 10 sn'ye çıkıyordu: geçmişi küçük tut
                 context_window_compression=types.ContextWindowCompressionConfig(
-                    sliding_window=types.SlidingWindow()),
+                    trigger_tokens=BAGLAM_SINIRI, sliding_window=types.SlidingWindow(target_tokens=BAGLAM_SINIRI // 2)),
+                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
                 session_resumption=types.SessionResumptionConfig(handle=self._devam_kolu),
                 tools=_arac_tanimlari(types),
                 system_instruction=SISTEM_TALIMATI,
             )
             try:
                 async with client.aio.live.connect(model=self.model, config=config) as oturum:
-                    print(f"🔴 Gemini Live bağlandı ({self.model})")
+                    print(f"🔴 Gemini Live bağlandı ({self.model}, {self.ad})")
                     bekleme = 1.0
                     self._bekleyen_turlar.clear()
                     self._tur = None
@@ -296,8 +310,9 @@ class CanliAsistan:
                         self._kuyruk.get_nowait()
                     self.bagli.set()
                     gorevler = [asyncio.create_task(self._gonderici(oturum)),
-                                asyncio.create_task(self._alici(oturum)),
-                                asyncio.create_task(self._gozcu())]
+                                asyncio.create_task(self._alici(oturum))]
+                    if self.gozcu_acik:
+                        gorevler.append(asyncio.create_task(self._gozcu()))
                     bitti, kalan = await asyncio.wait(gorevler, return_when=asyncio.FIRST_COMPLETED)
                     for g in kalan:
                         g.cancel()
@@ -305,7 +320,7 @@ class CanliAsistan:
                         if g.exception():
                             raise g.exception()
             except Exception as e:
-                print(f"⚠️  Gemini Live bağlantısı koptu: {type(e).__name__}: {str(e)[:200]}")
+                print(f"⚠️  Gemini Live ({self.ad}) bağlantısı koptu: {type(e).__name__}: {str(e)[:200]}")
             finally:
                 self.bagli.clear()
                 self.dinliyor = False
@@ -332,7 +347,7 @@ class CanliAsistan:
     async def _metin_turu(self, oturum, tur, metin, jpegler=()):
         parcalar = [self._resim(j) for j in jpegler if j is not None]
         parcalar.append(self.types.Part(text=metin))
-        self._bekleyen_turlar.append((tur, time.monotonic()))
+        self._kayit_ekle(tur)
         await oturum.send_client_content(turns=self.types.Content(role="user", parts=parcalar),
                                          turn_complete=True)
 
@@ -368,7 +383,7 @@ class CanliAsistan:
                     audio=t.Blob(data=komut[1], mime_type=f"audio/pcm;rate={GIRIS_ORNEKLEME}"))
             elif tur == "aktivite_bit":
                 self._son_etkilesim = time.monotonic()
-                self._bekleyen_turlar.append((TUR_CEVAP, time.monotonic()))
+                self._kayit_ekle(TUR_CEVAP)
                 await oturum.send_realtime_input(activity_end=t.ActivityEnd())
             elif tur == "gozcu":
                 self.sayac["gozcu"] += 1
@@ -402,7 +417,7 @@ class CanliAsistan:
                 continue
             self._eski_turlari_temizle()
             mesgul = (self.dinliyor or self._tur is not None or self._bekleyen_turlar
-                      or self.ses.normal_caliyor or self.ses.acil_caliyor)
+                      or self.ses.normal_caliyor or self.ses.acil_caliyor or self.mesgul_al())
             if mesgul or time.monotonic() - self._son_etkilesim < aralik:
                 continue
             if mod == "sokak" and self.duzey_al() == "sessiz":
@@ -420,24 +435,24 @@ class CanliAsistan:
             self._kuyruk.put_nowait(("gozcu", metin, jpeg))
 
     # ---------- alma ----------
-    def _eski_turlari_temizle(self, en_eski_s=30.0):
+    def _kayit_ekle(self, tur, omur=30.0, basa=False, atla=False, t0=None):
+        k = {"tur": tur, "t0": t0 or time.monotonic(), "eklendi": time.monotonic(), "atla": atla, "omur": omur}
+        (self._bekleyen_turlar.appendleft if basa else self._bekleyen_turlar.append)(k)
+
+    def _eski_turlari_temizle(self):
         """
         Cevabı hiç gelmeyen istek kaydı kuyrukta kalırsa sonraki cevaplar yanlış türe
-        eşlenir (ör. kullanıcının cevabı sessiz gözcü turu sanılır). Eski kayıtları at.
+        eşlenir (ör. kullanıcının cevabı sessiz gözcü turu sanılır). Ömrü dolanları at.
         """
         simdi = time.monotonic()
-        while self._bekleyen_turlar and simdi - self._bekleyen_turlar[0][1] > en_eski_s:
-            self._bekleyen_turlar.popleft()
+        self._bekleyen_turlar = deque(k for k in self._bekleyen_turlar if simdi - k["eklendi"] <= k["omur"])
 
     def _yeni_tur(self):
         self._eski_turlari_temizle()
-        turu, t0 = self._bekleyen_turlar.popleft() if self._bekleyen_turlar else (TUR_CEVAP, time.monotonic())
-        atla = False
-        if turu == TUR_CEVAP and self._susturulan_tur_sayisi > 0:
-            self._susturulan_tur_sayisi -= 1
-            atla = True
-        return {"tur": turu, "atla": atla, "oynatici": None, "pcm": [], "yazi": "",
-                "arac": False, "t0": t0}
+        k = self._bekleyen_turlar.popleft() if self._bekleyen_turlar else \
+            {"tur": TUR_CEVAP, "t0": time.monotonic(), "atla": False}
+        return {"tur": k["tur"], "atla": k["atla"], "oynatici": None, "pcm": [], "yazi": "",
+                "arac": False, "t0": k["t0"]}
 
     def _sesi_isle(self, tur, veri):
         """Gözcü turunun sesi atılır. Cevap turunda pcm hep biriktirilir (tekrar için)."""
@@ -550,13 +565,18 @@ class CanliAsistan:
                     self._tur["yazi"] += sc.output_transcription.text
                 if sc.interrupted and self._tur and self._tur["oynatici"]:
                     self._tur["oynatici"].kes()
-                if sc.turn_complete and self._tur is not None:
+                if sc.turn_complete and self._tur is None:
+                    # İçeriksiz tur (model hiçbir şey üretmedi): yine de isteğin kaydını tüket
+                    self._eski_turlari_temizle()
+                    if self._bekleyen_turlar:
+                        self._bekleyen_turlar.popleft()
+                elif sc.turn_complete:
                     tur = self._tur
-                    # Fonksiyon çağıran turun cevabı ayrı bir tur olarak gelir: türünü koru
+                    # Fonksiyon çağıran turun cevabı ayrı bir tur olarak gelir: türünü koru.
+                    # Gözcü turunun devamı gelmeyebilir: kaydı 3 sn yaşar (sonraki cevabı yutmasın)
                     if tur["arac"] and not tur["pcm"] and not tur["yazi"]:
-                        self._bekleyen_turlar.appendleft((tur["tur"], tur["t0"]))
-                        if tur["atla"]:
-                            self._susturulan_tur_sayisi += 1
+                        self._kayit_ekle(tur["tur"], omur=3.0 if tur["tur"] == TUR_GOZCU else 30.0,
+                                         basa=True, atla=tur["atla"], t0=tur["t0"])
                     else:
                         self._tur_bitti(tur)
                     self._tur = None

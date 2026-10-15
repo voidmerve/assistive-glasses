@@ -77,16 +77,28 @@ class Panel:
     konum_geldi: f(lat, lon, dogruluk) → navigasyona
     """
 
-    DUGME_OLAYLARI = {"kisa", "uzun_basladi", "uzun_bitti", "cift", "ev", "sokak"}
+    DUGME_OLAYLARI = {"kisa", "uzun_basladi", "uzun_bitti", "cift", "ev", "sokak", "sustur"}
 
     def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None, dugme_olayi=None):
         self.kare_al, self.durum_al, self.konum_geldi = kare_al, durum_al, konum_geldi
         self.dugme_olayi = dugme_olayi  # telefondaki kumanda düğmeleri → f(olay)
+        self._onbellek = {}             # {ad: (zaman, jpeg)}: kare her istemci için ayrı kodlanmasın
+        self._onbellek_kilit = threading.Lock()
         self.harita_al = harita_al or (lambda: None)  # renkli derinlik haritası (JPEG)
         self._abonelar = []
         self._kilit = threading.Lock()
         self._csv_kilit = threading.Lock()
         self.app = self._uygulama()
+
+    def _onbellekli(self, ad, uretici, omur_s):
+        """Aynı kareyi omur_s içinde tekrar üretmez: iki tarayıcı açıkken Pi iki kat yük almasın."""
+        with self._onbellek_kilit:
+            zaman, jpeg = self._onbellek.get(ad, (0.0, None))
+            if time.time() - zaman < omur_s:
+                return jpeg
+            jpeg = uretici()
+            self._onbellek[ad] = (time.time(), jpeg)
+            return jpeg
 
     # ---------- olay yayını ----------
     def yayinla(self, tur, veri):
@@ -132,9 +144,9 @@ class Panel:
 
             def akis():
                 while True:
-                    jpeg = self.kare_al() or bekleme
+                    jpeg = self._onbellekli("video", self.kare_al, 0.2) or bekleme
                     yield b"--kare\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-                    time.sleep(0.15)
+                    time.sleep(0.2)  # 5 kare/sn: jüri için yeterli, Pi'yi yormaz
             return Response(akis(), mimetype="multipart/x-mixed-replace; boundary=kare")
 
         @app.route("/derinlik")
@@ -143,9 +155,9 @@ class Panel:
 
             def akis():
                 while True:
-                    jpeg = self.harita_al() or bekleme
+                    jpeg = self._onbellekli("derinlik", self.harita_al, 0.9) or bekleme
                     yield b"--kare\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-                    time.sleep(0.5)
+                    time.sleep(1.0)
             return Response(akis(), mimetype="multipart/x-mixed-replace; boundary=kare")
 
         @app.route("/olaylar")
@@ -324,57 +336,78 @@ TELEFON_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Gözlük Kumanda</title>
 <style>
-:root{--bg:#0f1115;--kart:#181b22;--yazi:#e8eaf0;--soluk:#8b93a5;--yesil:#30a46c;--kirmizi:#e5484d;--mavi:#3e8ef7;--mor:#8e4ec6}
+:root{--bg:#0f1115;--kart:#181b22;--yazi:#e8eaf0;--soluk:#8b93a5;--yesil:#30a46c;--kirmizi:#e5484d;--mavi:#3e8ef7;--mor:#8e4ec6;--gri:#3a3f4b}
 *{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:var(--bg);color:var(--yazi);font:17px/1.4 system-ui,-apple-system,sans-serif;padding:16px;text-align:center}
-h1{font-size:20px;margin:4px 0 12px}
-button{font:inherit;font-weight:700;border:0;border-radius:16px;color:#fff;width:100%;touch-action:none}
-.izgara{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
-.buyuk{grid-column:1/3;padding:26px;font-size:22px}
-.orta{padding:20px}
-#onumde{background:var(--yesil)}#konus{background:var(--mavi)}#konus.basili{background:var(--kirmizi)}
-#tekrar{background:#3a3f4b}#ev,#sokak{background:var(--mor)}
-#konum{background:#2a2f3a;padding:16px;margin-top:6px}
-#durum,#gps{font-size:14px;color:var(--soluk);margin-top:8px;min-height:20px}
+body{margin:0;background:var(--bg);color:var(--yazi);font:17px/1.4 system-ui,-apple-system,sans-serif;padding:14px 16px 24px;text-align:center}
+h1{font-size:19px;margin:2px 0 10px}
+button{font:inherit;font-weight:700;border:0;border-radius:16px;color:#fff;width:100%;touch-action:manipulation}
+button:active{filter:brightness(1.25)}
+.izgara{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+.genis{grid-column:1/3}
+.buyuk{padding:24px;font-size:21px}
+.orta{padding:18px}
+#onumde{background:var(--yesil)}#konus{background:var(--mavi);touch-action:none}#konus.basili{background:var(--kirmizi)}
+#tekrar,#sustur{background:var(--gri)}#ev,#sokak{background:var(--mor)}#ev.secili,#sokak.secili{outline:3px solid #fff}
+#konum{background:var(--gri);padding:16px}#konum.acik{background:var(--yesil)}
+.bilgi{font-size:14px;color:var(--soluk);min-height:20px;margin-top:6px}
+#soylenen{background:var(--kart);border-radius:12px;padding:12px;margin-top:10px;text-align:left;min-height:48px;font-size:16px;-webkit-user-select:text;user-select:text}
 </style></head><body>
 <h1>Gözlük kumandası</h1>
 <div class="izgara">
- <button id="onumde" class="buyuk">Önümde ne var?</button>
- <button id="konus" class="buyuk">Basılı tut ve konuş</button>
+ <button id="onumde" class="buyuk genis">Önümde ne var?</button>
+ <button id="konus" class="buyuk genis">Basılı tut ve konuş</button>
  <button id="tekrar" class="orta">Tekrar</button>
+ <button id="sustur" class="orta">Sustur</button>
  <button id="ev" class="orta">Ev modu</button>
- <button id="sokak" class="orta" style="grid-column:1/3">Sokak modu</button>
+ <button id="sokak" class="orta">Sokak modu</button>
 </div>
-<div id="durum">&nbsp;</div>
-<button id="konum">Konumu paylaşmaya başla (navigasyon için)</button>
-<div id="gps"></div>
+<div class="bilgi" id="durum">&nbsp;</div>
+<div id="soylenen">Gözlüğün söyledikleri burada görünecek.</div>
+<button id="konum" style="margin-top:14px">Konum paylaşımını aç (navigasyon için)</button>
+<div class="bilgi" id="gps"></div>
 <script>
 const $=id=>document.getElementById(id);
-function gonder(olay){return fetch("/api/dugme",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({olay})})
- .then(r=>{$("durum").textContent=r.ok?"✓ "+olay:"Gözlük cevap vermedi"}).catch(()=>{$("durum").textContent="Gözlüğe ulaşılamıyor"})}
+// Her istek en fazla 4 sn bekler: takılan bir istek diğer düğmeleri kilitlemesin
+function istek(yol,veri){const ctl=new AbortController();const z=setTimeout(()=>ctl.abort(),4000);
+ return fetch(yol,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(veri),signal:ctl.signal}).finally(()=>clearTimeout(z))}
+function gonder(olay,etiket){$("durum").textContent="… "+etiket;
+ istek("/api/dugme",{olay}).then(r=>{$("durum").textContent=r.ok?"✓ "+etiket:"Gözlük cevap vermedi"})
+  .catch(()=>{$("durum").textContent="Gözlüğe ulaşılamadı"})}
 function titret(ms){if(navigator.vibrate)navigator.vibrate(ms)}
-$("onumde").onclick=()=>{titret(30);gonder("kisa")};
-$("tekrar").onclick=()=>{titret(30);gonder("cift")};
-$("ev").onclick=()=>{titret(30);gonder("ev")};
-$("sokak").onclick=()=>{titret(30);gonder("sokak")};
-// Basılı tut ve konuş: parmak kalkınca, kaydırınca ya da sayfa gizlenince kayıt biter
-let basili=false;
-function bas(e){e.preventDefault();if(basili)return;basili=true;$("konus").classList.add("basili");$("konus").textContent="Dinliyorum… bırakınca biter";titret(40);gonder("uzun_basladi")}
-function birak(e){if(e)e.preventDefault();if(!basili)return;basili=false;$("konus").classList.remove("basili");$("konus").textContent="Basılı tut ve konuş";titret(20);gonder("uzun_bitti")}
-const k=$("konus");k.addEventListener("pointerdown",bas);["pointerup","pointercancel","pointerleave"].forEach(o=>k.addEventListener(o,birak));
+$("onumde").onclick=()=>{titret(30);gonder("kisa","Önümde ne var")};
+$("tekrar").onclick=()=>{titret(30);gonder("cift","Tekrar")};
+$("sustur").onclick=()=>{titret(30);gonder("sustur","Sustur")};
+$("ev").onclick=()=>{titret(30);gonder("ev","Ev modu");modGoster("home")};
+$("sokak").onclick=()=>{titret(30);gonder("sokak","Sokak modu");modGoster("street")};
+function modGoster(m){$("ev").classList.toggle("secili",m==="home");$("sokak").classList.toggle("secili",m==="street")}
+// Basılı tut ve konuş: parmak kayınca kesilmesin diye işaretçi yakalanır
+let basili=false;const k=$("konus");
+function bas(e){e.preventDefault();if(basili)return;basili=true;try{k.setPointerCapture(e.pointerId)}catch(_){}
+ k.classList.add("basili");k.textContent="Dinliyorum… bırakınca biter";titret(40);gonder("uzun_basladi","Dinliyor")}
+function birak(e){if(e)e.preventDefault();if(!basili)return;basili=false;k.classList.remove("basili");
+ k.textContent="Basılı tut ve konuş";titret(20);gonder("uzun_bitti","Soru gönderildi")}
+k.addEventListener("pointerdown",bas);["pointerup","pointercancel"].forEach(o=>k.addEventListener(o,birak));
 k.addEventListener("contextmenu",e=>e.preventDefault());
 document.addEventListener("visibilitychange",()=>{if(document.hidden)birak()});
-// Konum paylaşımı
-let izleyici=null,kilit=null,sayac=0;
-async function ekranAcik(){try{kilit=await navigator.wakeLock.request("screen")}catch(e){}}
+// Gözlüğün söyledikleri (canlı)
+try{const es=new EventSource("/olaylar");es.onmessage=e=>{const m=JSON.parse(e.data);
+ if(m.tur==="gozluk"||m.tur==="uyari"||m.tur==="nav_duyuru")$("soylenen").textContent=(m.tur==="uyari"?"🚧 ":m.tur==="nav_duyuru"?"🧭 ":"📢 ")+m.veri;
+ if(m.tur==="durum")modGoster(m.veri.mod)}}catch(_){}
+// Konum paylaşımı: aç/kapat; aynı anda tek istek, saniyede en fazla bir
+let izleyici=null,kilit=null,sayac=0,gonderiliyor=false,sonGonderim=0;
+async function ekranAcik(){try{kilit=await navigator.wakeLock.request("screen")}catch(_){}}
+function konumGonder(c){const simdi=Date.now();if(gonderiliyor||simdi-sonGonderim<1000)return;
+ gonderiliyor=true;sonGonderim=simdi;
+ istek("/api/konum",{lat:c.latitude,lon:c.longitude,dogruluk:c.accuracy}).then(()=>{sayac++})
+  .catch(()=>{}).finally(()=>{gonderiliyor=false;$("gps").textContent=`Konum gidiyor · ±${Math.round(c.accuracy)} m · ${sayac}`})}
 $("konum").onclick=()=>{
+ if(izleyici!==null){navigator.geolocation.clearWatch(izleyici);izleyici=null;
+  if(kilit){kilit.release().catch(()=>{});kilit=null}
+  $("konum").classList.remove("acik");$("konum").textContent="Konum paylaşımını aç (navigasyon için)";$("gps").textContent="Konum kapalı";return}
  if(!navigator.geolocation){$("gps").textContent="Bu tarayıcı konum vermiyor";return}
- if(izleyici!==null)return;ekranAcik();$("gps").textContent="Konum izni bekleniyor…";
- izleyici=navigator.geolocation.watchPosition(p=>{const c=p.coords;sayac++;
-  fetch("/api/konum",{method:"POST",headers:{"Content-Type":"application/json"},
-   body:JSON.stringify({lat:c.latitude,lon:c.longitude,dogruluk:c.accuracy})}).catch(()=>{});
-  $("gps").textContent=`Konum gidiyor ✓ ±${Math.round(c.accuracy)} m · ${sayac}`},
+ ekranAcik();$("gps").textContent="Konum izni bekleniyor…";
+ izleyici=navigator.geolocation.watchPosition(p=>konumGonder(p.coords),
   e=>{$("gps").textContent="Konum alınamadı: "+e.message},{enableHighAccuracy:true,maximumAge:1000,timeout:15000});
- $("konum").textContent="Konum paylaşılıyor (sayfayı açık tut)"};
+ $("konum").classList.add("acik");$("konum").textContent="Konum paylaşılıyor · kapatmak için dokun"};
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&izleyici!==null)ekranAcik()});
 </script></body></html>"""

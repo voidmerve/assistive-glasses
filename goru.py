@@ -63,14 +63,28 @@ class NesneTanima(threading.Thread):
         self.boyut = (640, 480)
         self.durdur_olayi = threading.Event()
 
-    def run(self):
+    def yukle(self):
+        """Modeli yükler. Başarılıysa True. (Görü hattı bunu kendi thread'inde çağırır.)"""
+        if self.model is not None:
+            return True
         try:
             from ultralytics import YOLO
             t0 = time.time()
             self.model = YOLO(YOLO_MODEL)
             print(f"👁️  YOLO hazır ({time.time() - t0:.1f} s)")
+            return True
         except Exception as e:
             print(f"⚠️  YOLO yüklenemedi, panelde kutu olmayacak: {type(e).__name__}: {e}")
+            self.model = False
+            return False
+
+    def isle(self, kare):
+        """Tek kare işler (görü hattından sırayla çağrılır: YOLO ile derinlik aynı anda çalışmasın)."""
+        if self.model:
+            self._isle(kare)
+
+    def run(self):
+        if not self.yukle():
             return
         while not self.durdur_olayi.is_set():
             t0 = time.time()

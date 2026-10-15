@@ -25,16 +25,20 @@ Kendi kendine kalibrasyon: Boyu bilinen nesneler (insan ~1,70 m, araba ~1,50 m,
   tahminin oranı zamanla ortalanır ve derinlik haritası bu oranla düzeltilir.
   Kesilmiş (kare kenarına değen) kutular hesaba katılmaz.
 
-Kameradan yaklaşma uyarısı (sokak modunda, KAMERA_UYARI=1):
-  Tam öndeki mesafe iki ölçüm arasında belirgin azalıyor ve çarpışmaya kalan
-  süre kısa görünüyorsa uyarır. Saniyede ~0,5 ölçümle çalıştığı için lazer
-  sensörün yerini TUTMAZ; sensör gelene kadar kaba bir yedektir.
+Kameradan engel uyarısı (KAMERA_UYARI=1):
+  Yürüme yolunun ortasında ENGEL_UYARI_M'den yakın bir şey varsa açık tarafı
+  söyler: "Önünde sandalye var, sağdan geç"; ENGEL_DUR_M'den yakınsa önce bip +
+  "Dur". Durduğun yerde de çalışır. Saniyede ~0,8 ölçümle çalıştığı için lazer
+  sensör kadar hızlı değildir: yavaş yürüyüş için uygundur.
 
 Ayarlar (.env):
-  DERINLIK_ARALIK_S=2.0
+  DERINLIK_ARALIK_S=0.6    # turlar arası mola (YOLO + derinlik bir tur ~1,3 sn)
+  GORU_CEKIRDEK=3          # 4 çekirdeğin biri Live, ses ve panel için boş kalsın
+  ENGEL_UYARI_M=1.3
+  ENGEL_DUR_M=0.7
   KAMERA_DIKEY_FOV=67      # Camera Module 3 Wide dikey görüş açısı (derece)
   KAMERA_UYARI=1
-  DERINLIK_MODELI=mod      # mod | ic | dis  (sunum salondaysa: ic)
+  DERINLIK_MODELI=ic       # ic | dis | mod (mod: ev → iç, sokak → dış). İç mekân modeli yakın mesafede en doğrusu
   DERINLIK_CARPAN=0.75     # gerçek / gösterilen mesafe (1-2-3 m testiyle bulunur)
 """
 
@@ -54,12 +58,17 @@ def _sayi(ad, varsayilan):
         return varsayilan
 
 
-DERINLIK_ARALIK_S = _sayi("DERINLIK_ARALIK_S", 2.0)
+DERINLIK_ARALIK_S = _sayi("DERINLIK_ARALIK_S", 0.6)   # turlar arası mola; tur ~1,3 sn → ölçüm ~2 sn'de bir
+# Görü hattı en fazla bu kadar çekirdek kullanır: 4'ünü de alınca Live cevapları 5-15 sn gecikiyordu
+GORU_CEKIRDEK = int(_sayi("GORU_CEKIRDEK", 3))
+ENGEL_UYARI_M = _sayi("ENGEL_UYARI_M", 1.3)           # yürüme yolunda bundan yakın: "Önünde sandalye var"
+ENGEL_DUR_M = _sayi("ENGEL_DUR_M", 0.7)               # bundan yakın: bip + "Dur"
+ENGEL_TEKRAR_S = _sayi("ENGEL_TEKRAR_S", 8.0)         # engel durdukça hatırlatma aralığı
 KAMERA_DIKEY_FOV = _sayi("KAMERA_DIKEY_FOV", 67.0)
 KAMERA_UYARI = (os.getenv("KAMERA_UYARI") or "1").strip() not in ("0", "hayir", "false")
 # mod: ev → iç mekân, sokak → dış mekân modeli. ic / dis: her zaman o model
 # (sunum salonda yapılacaksa sokak modunda da doğru mesafe için DERINLIK_MODELI=ic)
-DERINLIK_MODELI = (os.getenv("DERINLIK_MODELI") or "mod").strip().lower()
+DERINLIK_MODELI = (os.getenv("DERINLIK_MODELI") or "ic").strip().lower()
 # Geniş açılı lens (Camera Module 3 Wide) nesneleri küçük gösterir; model eğitildiği kameralara
 # göre mesafeyi büyük tahmin eder. Ölçülen gerçek / gösterilen oranı (ör. 3 m'yi 4 m gösteriyorsa 0,75).
 DERINLIK_CARPAN = _sayi("DERINLIK_CARPAN", 1.0)
@@ -97,10 +106,13 @@ class KameraMesafe(threading.Thread):
     uyari: f(seviye, metin) → yaklaşma uyarısı (seviye "dikkat" | "dur")
     """
 
-    def __init__(self, kare_al, mod_al, tespitler_al=None, uyari=None, aralik=DERINLIK_ARALIK_S):
-        super().__init__(daemon=True, name="derinlik")
+    def __init__(self, kare_al, mod_al, yolo=None, uyari=None, aralik=DERINLIK_ARALIK_S):
+        """yolo: goru.NesneTanima. Bu thread onu her karede derinlikten hemen önce çalıştırır:
+        ikisi aynı anda çalışınca 4 çekirdeği paylaşıp birbirini 3-4 kat yavaşlatıyordu."""
+        super().__init__(daemon=True, name="gorus")
         self.kare_al, self.mod_al = kare_al, mod_al
-        self.tespitler_al = tespitler_al or (lambda: [])
+        self.yolo = yolo
+        self.tespitler_al = (lambda: yolo.son) if yolo is not None else (lambda: [])
         self.uyari = uyari
         self.aralik = aralik
         self.model, self.model_modu = None, None
@@ -108,8 +120,9 @@ class KameraMesafe(threading.Thread):
         self._olcek_ornek = 0
         self.son_olcum = None
         self.son_harita = None     # renkli derinlik haritası (panel için, BGR)
-        self._onceki = None        # (zaman, tam_on) yaklaşma uyarısı için
+        self.engel_seviye = 0       # 0 yok, 1 dikkat, 2 dur
         self._son_uyari = 0.0
+        self.son_engel = None
         self.durdur_olayi = threading.Event()
         self._kilit = threading.Lock()
 
@@ -134,6 +147,13 @@ class KameraMesafe(threading.Thread):
 
     # ---------- döngü ----------
     def run(self):
+        try:
+            import torch
+            torch.set_num_threads(GORU_CEKIRDEK)
+        except Exception:
+            pass
+        if self.yolo is not None:
+            self.yolo.yukle()
         while not self.durdur_olayi.is_set():
             t0 = time.time()
             try:
@@ -146,6 +166,8 @@ class KameraMesafe(threading.Thread):
                     self._model_yukle(mod)
                 kare = self.kare_al()
                 if kare is not None:
+                    if self.yolo is not None:
+                        self.yolo.isle(kare)
                     self._isle(kare)
             except Exception as e:
                 print(f"⚠️  Derinlik hatası: {type(e).__name__}: {e}")
@@ -191,7 +213,8 @@ class KameraMesafe(threading.Thread):
             mesafe = d_ham * self.olcek
             kaynak = "derinlik"
             # Boy tahmini: kutu kare kenarına değmiyorsa (nesne kesilmemişse)
-            if sinif in BILINEN_BOY and y1 > 4 and y2 < h - 4 and (y2 - y1) > 20:
+            ayakta = sinif != "person" or (y2 - y1) > 1.8 * (x2 - x1)  # oturan insan 1,70 m değildir
+            if sinif in BILINEN_BOY and ayakta and y1 > 4 and y2 < h - 4 and (y2 - y1) > 20:
                 d_boy = odak * BILINEN_BOY[sinif] / (y2 - y1)
                 if 0.3 < d_boy < 30:
                     oranlar.append(d_boy / max(d_ham, 0.1))
@@ -202,16 +225,21 @@ class KameraMesafe(threading.Thread):
         self._olcek_guncelle(oranlar)
         nesneler.sort(key=lambda n: n["mesafe"])
 
-        tam_on = bolgeler["orta"]
+        # Yürüme yolu: görüntünün alt-orta bandı (gözlük kamerası yerdeki ve göğüs hizasındaki engeli burada görür)
+        yol = derinlik[int(GIRIS_H * 0.35):int(GIRIS_H * 0.92)]
+        yol_bolgeler = {ad: float(np.percentile(yol[:, a:b], 10))
+                        for ad, (a, b) in {"sol": (0, ucte), "orta": (ucte, 2 * ucte), "sag": (2 * ucte, GIRIS_W)}.items()}
+        tam_on = min(bolgeler["orta"], yol_bolgeler["orta"])
         olcum = {"zaman": time.time(), "tam_on": round(tam_on, 2),
-                 "bolgeler": {k: round(v, 2) for k, v in bolgeler.items()}, "nesneler": nesneler,
+                 "bolgeler": {k: round(v, 2) for k, v in bolgeler.items()},
+                 "yol": {k: round(v, 2) for k, v in yol_bolgeler.items()}, "nesneler": nesneler,
                  "olcek": round(self.olcek, 3), "model": self.model_modu,
                  "sure_ms": round((time.time() - t0) * 1000)}
         renkli = cv2.applyColorMap(
             (255 - np.clip(derinlik / 6.0, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_TURBO)  # yakın = kırmızı
         with self._kilit:
             self.son_olcum, self.son_harita = olcum, renkli
-        self._yaklasma_kontrol(olcum)
+        self._engel_kontrol(olcum, w)
 
     def _olcek_guncelle(self, oranlar):
         """Boy tahminiyle derinlik tahmininin oranını yavaşça ortalar (aykırı değerlere dayanıklı)."""
@@ -226,27 +254,48 @@ class KameraMesafe(threading.Thread):
         self.olcek = min(2.0, max(0.5, yeni))
         self._olcek_ornek += 1
 
-    def _yaklasma_kontrol(self, olcum):
-        """Kaba yaklaşma uyarısı: iki ölçüm arasında tam öndeki mesafe hızla azalıyorsa."""
-        simdi, d = olcum["zaman"], olcum["tam_on"]
-        onceki, self._onceki = self._onceki, (simdi, d)
-        if not (KAMERA_UYARI and self.uyari and onceki and self.mod_al() == "sokak"):
-            return
-        dt = simdi - onceki[0]
-        if dt <= 0 or dt > 5:
-            return
-        hiz = (onceki[1] - d) / dt   # pozitif = yaklaşıyor
-        if hiz < 0.25 or d > 2.5 or simdi - self._son_uyari < 4:
-            return
-        ttc = d / hiz
-        if d < 0.9 or ttc < 1.5:
-            seviye = "dur"
-        elif ttc < 3.0:
-            seviye = "dikkat"
+    def _engel_kontrol(self, olcum, genislik):
+        """
+        Yürüme yolunun ortasında yakın bir şey varsa uyarır; durduğun yerde de çalışır
+        (sensör yokken hıza bakılamaz). Açık tarafı söyler: "Önünde sandalye var, sağdan geç".
+          ortası < ENGEL_DUR_M   → seviye 2 (bip + "Dur")
+          ortası < ENGEL_UYARI_M → seviye 1
+          ortası > ENGEL_UYARI_M + 0,3 → temiz (histerezis: eşikte titreyip açılıp kapanmasın)
+        Seviye yükselince hemen, aynı seviyede kaldıkça ENGEL_TEKRAR_S'de bir söylenir.
+        """
+        yol, simdi = olcum["yol"], olcum["zaman"]
+        orta = yol["orta"]
+        eski = self.engel_seviye
+        # Her eşiğin kendi histerezisi: eşikte titreyen ölçüm uyarıyı açıp kapatmasın
+        if orta < ENGEL_DUR_M or (eski == 2 and orta < ENGEL_DUR_M + 0.15):
+            seviye = 2
+        elif orta < ENGEL_UYARI_M or (eski >= 1 and orta < ENGEL_UYARI_M + 0.3):
+            seviye = 1
         else:
+            seviye = 0
+        self.engel_seviye = seviye
+        if seviye == 0 or not self.uyari:
+            self.son_engel = None
             return
+        if seviye <= eski and simdi - self._son_uyari < ENGEL_TEKRAR_S:
+            return
+        # Engelin adı: ortadaki, mesafesi yol ortasına yakın YOLO nesnesi
+        ad, sinif = "engel", None
+        for n in olcum["nesneler"]:
+            x1, _, x2, _ = n["kutu"]
+            if x1 < genislik * 0.67 and x2 > genislik * 0.33 and n["mesafe"] < orta + 0.6:
+                ad, sinif = n["ad"], n["sinif"]
+                break
+        # Açık taraf: diğer iki bölgeden belirgin uzak olan
+        sol, sag = yol["sol"], yol["sag"]
+        if max(sol, sag) > max(orta + 0.5, ENGEL_UYARI_M):
+            taraf = "sol" if sol > sag else "sag"
+        else:
+            taraf = None
         self._son_uyari = simdi
-        self.uyari(seviye, f"kamera: tam önde {d:.1f} m, {hiz:.2f} m/s yaklaşıyor, çarpışmaya ~{ttc:.1f} s")
+        self.son_engel = {"seviye": seviye, "ad": ad, "sinif": sinif, "taraf": taraf, "mesafe": round(orta, 2),
+                          "tekrar": seviye <= eski}  # aynı engelin hatırlatması mı, yeni/yükselen mi
+        self.uyari(self.son_engel)
 
     # ---------- dışarıya ----------
     def guncel(self, en_eski_s=6.0):

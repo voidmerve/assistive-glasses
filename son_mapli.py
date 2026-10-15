@@ -419,7 +419,11 @@ def konusmayi_kes():
         _konusma_nesli += 1
     kesildi = ses_yoneticisi.normal_kes()
     canli_kesildi = canli.konusmayi_kes() if canli is not None else False
-    return kesildi or hazirlaniyor or canli_kesildi
+    sebep = [ad for ad, v in (("hazırlanan konuşma", hazirlaniyor), ("çalan ses", kesildi),
+                              ("Live cevabı", canli_kesildi)) if v]
+    if sebep:
+        print(f"   (kesilen: {', '.join(sebep)})")
+    return bool(sebep)
 
 
 def oynat(yol):
@@ -493,7 +497,7 @@ def durum_ozeti():
         "ai": ("Live (bağlı)" if canli_hazir() else "Live (bağlanıyor)") if canli is not None else "REST",
         "hafiza": esya_hafizasi.liste(),
         "nav": nav_durum,
-        "gozcu": dict(canli.sayac) if canli is not None else None,
+        "gozcu": dict(canli_gozcu.sayac) if canli_gozcu is not None else None,
     }
 
 
@@ -504,8 +508,9 @@ def mod_degistir(yeni, sesli_onay=True):
     ayarlar["mod"] = yeni
     ayarlari_kaydet()
     print(f"\n{'🏠 EV' if yeni == MOD_EV else '🚶 SOKAK'} MODU")
-    if canli is not None:
-        canli.not_dus(f"Mod değişti: artık {yeni} modundasın.")
+    for oturum in (canli, canli_gozcu):
+        if oturum is not None:
+            oturum.not_dus(f"Mod değişti: artık {yeni} modundasın.")
     yayinla("durum", durum_ozeti())
     if sesli_onay:
         oynat(guvenlik.ses_yolu(f"{yeni}_modu"))
@@ -584,22 +589,53 @@ def mesafe_bilgisi_metni(_sensor_m=None):
     return " ".join(p for p in parcalar if p)
 
 
-def kamera_uyarisi(seviye, metin):
-    """Sensör yokken kameranın kaba yaklaşma uyarısı (sokak modu)."""
+ENGEL_SES = {"person": "insan", "chair": "sandalye", "dining table": "masa", "couch": "kanepe", "bed": "yatak",
+             "car": "araba", "bicycle": "bisiklet", "motorcycle": "motosiklet", "bus": "otobus", "truck": "kamyon",
+             "bench": "bank", "dog": "kopek", "potted plant": "saksi", "refrigerator": "buzdolabi", "suitcase": "bavul"}
+_engel_sayac = 0
+
+
+def engel_uyarisi(e):
+    """
+    Kameradan engel uyarısı (mesafe.py): "Önünde sandalye var, sağdan geç"; çok yakınsa önce bip + "Dur".
+    Önceden kaydedilmiş seslerden birleştirilir: internet gerekmez, anında çalar, konuşmayı keser.
+    Sensör takılıysa uyarıyı sensör verir. Ev modunda kapalı (ENGEL_UYARI_EV=1 ile açılır).
+    """
+    global _engel_sayac
     if not guvenlik_sistemi.sensor_kapali:
-        return  # sensör varsa uyarıyı o verir
-    print(f"📐 {'DUR' if seviye == 'dur' else 'Dikkat'} — {metin}")
-    yayinla("uyari", f"{'DUR' if seviye == 'dur' else 'Dikkat'} ({metin})")
-    if seviye == "dur":
-        ses_yoneticisi.acil_cal(guvenlik.ses_yolu("bip_dur"))
-        guvenlik_sistemi.titresim.titret(1.0, 0.4)
-    else:
-        def tiklar():
-            for _ in range(3):
-                ses_yoneticisi.tik(0.8)
-                guvenlik_sistemi.titresim.titret(0.7, 0.06)
-                time.sleep(0.18)
-        threading.Thread(target=tiklar, daemon=True).start()
+        return
+    if mod() == MOD_EV and (os.getenv("ENGEL_UYARI_EV") or "0").strip() != "1":
+        return
+    # Aynı engelin hatırlatması, kullanıcının sorduğu bir cevap çalarken onu kesmesin.
+    # Yeni engel ya da "Dur"a yükselme her zaman keser.
+    # Sessiz gözcü turları sayılmaz: sadece kullanıcıya çalınan bir cevap
+    cevap_suruyor = ses_yoneticisi.normal_caliyor or (
+        canli is not None and canli._tur is not None and canli._tur["tur"] == "cevap" and not canli._tur["atla"])
+    if e.get("tekrar") and cevap_suruyor:
+        print(f"🚧 (hatırlatma atlandı, cevap sürüyor) önünde {e['ad']} {e['mesafe']:.1f} m")
+        return
+    parcalar = []
+    if e["seviye"] == 2:
+        parcalar.append("bip_dur")
+    parcalar.append("on_" + ENGEL_SES.get(e["sinif"], "engel"))
+    parcalar.append({"sag": "gec_sag", "sol": "gec_sol"}.get(e["taraf"], "gec_yok"))
+    yollar = [guvenlik.ses_yolu(p) for p in parcalar if os.path.exists(guvenlik.ses_yolu(p))]
+    metin = (f"{'DUR — ' if e['seviye'] == 2 else ''}önünde {e['ad']} ({e['mesafe']:.1f} m), "
+             f"{ {'sag': 'sağdan geç', 'sol': 'soldan geç'}.get(e['taraf'], 'önü kapalı') }")
+    print(f"🚧 {metin}")
+    yayinla("uyari", metin)
+    if not yollar:
+        ses_yoneticisi.acil_cal(guvenlik.ses_yolu("bip"))
+        return
+    # Parçaları tek dosyada birleştir (arada kısa sessizlik): iki ayrı çalma gecikmesi olmasın
+    ses = [guvenlik._wav_oku(y) for y in yollar]
+    bosluk = np.zeros(int(guvenlik.ORNEKLEME_HIZI * 0.08), np.float32)
+    birlesik = np.concatenate([x for parca in ses for x in (parca, bosluk)])
+    _engel_sayac += 1
+    yol = f"/tmp/engel_{_engel_sayac % 4}.wav"
+    guvenlik._wav_yaz(yol, birlesik)
+    ses_yoneticisi.acil_cal(yol)
+    guvenlik_sistemi.titresim.titret(1.0 if e["seviye"] == 2 else 0.6, 0.4 if e["seviye"] == 2 else 0.15)
 
 
 # ───────────────── NAVİGASYON ─────────────────
@@ -790,7 +826,8 @@ def tekrarla():
 
 # ───────────────── GEMINI LIVE ─────────────────
 AI_MOTORU = (os.getenv("AI_MOTORU") or "live").strip().lower()
-canli = None   # main() içinde kamera açıldıktan sonra kurulur
+canli = None        # kullanıcıyla konuşan Live oturumu (main() içinde kurulur)
+canli_gozcu = None  # arka planda sessizce bakan ikinci oturum (sokak olayları, eşya hafızası)
 cam = None
 nesne_tanima = None
 
@@ -910,28 +947,35 @@ def son_ses_ayarla(yol):
 
 
 def canli_kur():
-    """AI_MOTORU=live ise Gemini Live'ı başlatır. Kurulamazsa eski yol kullanılır."""
-    global canli
+    """
+    AI_MOTORU=live ise iki Gemini Live oturumu açar: biri kullanıcıyla konuşur, diğeri
+    arka planda kareye bakıp fonksiyonla bildirir. Tek oturumda gözcü kareleri geçmişte
+    birikip kullanıcının cevaplarını 5-15 sn geciktiriyordu. Kurulamazsa eski yol kullanılır.
+    """
+    global canli, canli_gozcu
     if AI_MOTORU != "live":
         print("🤖 Yapay zekâ: REST (AI_MOTORU=rest)")
         return
     try:
         import canli as canli_modulu
-        canli = canli_modulu.CanliAsistan(
-            api_key=API_KEY, ses=ses_yoneticisi,
-            araclar={"mesafe_olc": arac_mesafe_olc, "ayar_degistir": arac_ayar_degistir,
-                     "anlatim_sikligi": arac_anlatim_sikligi, "mod_degistir": arac_mod_degistir,
-                     "durum_bildir": arac_durum_bildir, "esya_kaydet": arac_esya_kaydet,
-                     "esya_nerede": arac_esya_nerede, "bildir": arac_bildir,
-                     "cevreyi_tara": arac_cevreyi_tara, "navigasyon_baslat": arac_navigasyon_baslat,
-                     "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim},
-            kare_al=kare_jpeg, duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA),
-            mod_al=mod, son_ses_ayarla=son_ses_ayarla, yayinla=yayinla, olcum=olcum,
-            mesafe_bilgisi=mesafe_bilgisi_metni).baslat()
-        print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}), bağlı değilken REST")
+        araclar = {"mesafe_olc": arac_mesafe_olc, "ayar_degistir": arac_ayar_degistir,
+                   "anlatim_sikligi": arac_anlatim_sikligi, "mod_degistir": arac_mod_degistir,
+                   "durum_bildir": arac_durum_bildir, "esya_kaydet": arac_esya_kaydet,
+                   "esya_nerede": arac_esya_nerede, "bildir": arac_bildir,
+                   "cevreyi_tara": arac_cevreyi_tara, "navigasyon_baslat": arac_navigasyon_baslat,
+                   "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim}
+        ortak = dict(api_key=API_KEY, ses=ses_yoneticisi, araclar=araclar, kare_al=kare_jpeg,
+                     duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA), mod_al=mod,
+                     son_ses_ayarla=son_ses_ayarla, mesafe_bilgisi=mesafe_bilgisi_metni)
+        canli = canli_modulu.CanliAsistan(**ortak, yayinla=yayinla, olcum=olcum, gozcu=False, ad="kullanıcı").baslat()
+        canli_gozcu = canli_modulu.CanliAsistan(
+            **ortak, gozcu=True, ad="gözcü",
+            mesgul_al=lambda: canli.dinliyor or canli._tur is not None or bool(canli._bekleyen_turlar)).baslat()
+        print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}, kullanıcı + gözcü oturumu), "
+              f"bağlı değilken REST")
     except Exception as e:
         print(f"⚠️  Gemini Live başlatılamadı, REST kullanılıyor: {type(e).__name__}: {e}")
-        canli = None
+        canli = canli_gozcu = None
 
 
 def canli_hazir():
@@ -976,12 +1020,16 @@ def panel_besleyici():
         try:
             mt = guvenlik_sistemi.mantik
             o = kamera_mesafe.guncel() if kamera_mesafe else None
-            if o is not None and o["zaman"] != son_derinlik:
+            yeni_derinlik = o is not None and o["zaman"] != son_derinlik
+            if yeni_derinlik:
                 son_derinlik = o["zaman"]
                 yayinla("mesafe", {k: o[k] for k in ("tam_on", "nesneler", "olcek", "model", "sure_ms")})
             if guvenlik_sistemi.sensor_kapali:
-                yayinla("sensor", {"mesafe": None if o is None else o["tam_on"], "hiz": 0.0, "ttc": None,
-                                   "seviye": 0, "arizali": False, "kaynak": "kamera (derinlik AI)"})
+                # Sensör yokken sadece yeni ölçüm gelince gönder (saniyede 5 boş olay göndermesin)
+                if yeni_derinlik:
+                    yayinla("sensor", {"mesafe": o["tam_on"], "hiz": 0.0, "ttc": None,
+                                       "seviye": kamera_mesafe.engel_seviye, "arizali": False,
+                                       "kaynak": "kamera (derinlik AI)"})
             else:
                 yayinla("sensor", {
                 "mesafe": guvenlik_sistemi.son_mesafe, "hiz": mt.hiz,
@@ -1020,11 +1068,14 @@ def olay_geldi(olay):
     """Düğme/klavye thread'inden çağrılır. Hızlı işler burada, ağır işler ana döngüde."""
     if olay == kontrol.CIKIS:
         kapat()
-    elif olay == kontrol.KISA:
-        # Konuşma sürüyorsa kısa basış önce susturur
+    elif olay == "sustur":
         if konusmayi_kes():
             print("\n🤫 Susturuldu")
-            return
+    elif olay == kontrol.KISA:
+        # Önce o an süren konuşmayı kes, sonra her zaman sor (önceden sadece susturuyordu:
+        # bekleyen navigasyon duyuruları varken soru hiç sorulmuyordu)
+        if konusmayi_kes():
+            print("\n🤫 Önceki konuşma kesildi")
         if canli_hazir() and canli.onumde_ne_var(guvenlik_sistemi.son_mesafe):
             return
         olay_kuyrugu.put((kontrol.KISA, None))
@@ -1074,6 +1125,8 @@ def keyboard_loop():
                     olay_geldi("ev")
                 elif key in ("s", "S"):
                     olay_geldi("sokak")
+                elif key in ("x", "X"):
+                    olay_geldi("sustur")
                 elif key:
                     dugme.tus(key)
         except Exception as e:
@@ -1094,11 +1147,9 @@ def main():
                               harita_al=lambda: kamera_mesafe.harita_jpeg() if kamera_mesafe else None,
                               dugme_olayi=telefon_dugmesi).baslat()
     if goru.YOLO_ACIK:
+        # Ayrı thread başlatılmaz: görü hattı (mesafe.py) her karede önce YOLO'yu, sonra derinliği çalıştırır
         nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
-        nesne_tanima.start()
-    kamera_mesafe = mesafe.KameraMesafe(
-        kare_al=cam.get, mod_al=mod, tespitler_al=lambda: nesne_tanima.son if nesne_tanima else [],
-        uyari=kamera_uyarisi)
+    kamera_mesafe = mesafe.KameraMesafe(kare_al=cam.get, mod_al=mod, yolo=nesne_tanima, uyari=engel_uyarisi)
     kamera_mesafe.start()
     canli_kur()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
@@ -1112,7 +1163,7 @@ def main():
     print("SİSTEM HAZIR")
     print("=" * 60)
     print("Düğme: kısa = önümde ne var | uzun = soru sor | çift = tekrar")
-    print("Klavye: d = kısa | SPACE = uzun başlat/bitir | r = çift | h = ev | s = sokak | q = çıkış")
+    print("Klavye: d = kısa | SPACE = uzun başlat/bitir | r = çift | x = sustur | h = ev | s = sokak | q = çıkış")
     print("Sesle: ev modu, sokak modu, ne görüyorsun, çevreyi tara, anahtarım nerede,")
     print("       ... götür, neredeyim, daha çok/az anlat, kısa konuş, detaylı anlat, sessiz ol")
     print(f"Mod: {mod()} | konuşma düzeyi: {ayarlar.get('konusma_duzeyi')} | anlatıcı: {anlatim.siklik}")

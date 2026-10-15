@@ -119,6 +119,27 @@ SES_DOSYALARI = {
     "siklik_cok": "Daha sık anlatacağım",
     "siklik_az": "Daha seyrek anlatacağım",
     "tarama": "Başını yavaşça sağdan sola çevir",
+    # Kameradan engel uyarısı: "Önünde sandalye var" + "sağdan geç" birleştirilerek çalınır
+    "on_engel": "Önünde engel var",
+    "on_insan": "Önünde insan var",
+    "on_sandalye": "Önünde sandalye var",
+    "on_masa": "Önünde masa var",
+    "on_kanepe": "Önünde koltuk var",
+    "on_yatak": "Önünde yatak var",
+    "on_araba": "Önünde araba var",
+    "on_bisiklet": "Önünde bisiklet var",
+    "on_motosiklet": "Önünde motosiklet var",
+    "on_otobus": "Önünde otobüs var",
+    "on_kamyon": "Önünde kamyon var",
+    "on_bank": "Önünde bank var",
+    "on_kopek": "Önünde köpek var",
+    "on_saksi": "Önünde saksı var",
+    "on_buzdolabi": "Önünde buzdolabı var",
+    "on_bavul": "Önünde bavul var",
+    "on_direk": "Önünde direk var",
+    "gec_sag": "sağdan geç",
+    "gec_sol": "soldan geç",
+    "gec_yok": "önün kapalı",
 }
 # İnternetsiz üretilen kısa tonlar (sözsüz durum bildirimleri)
 TONLAR = ["ton_internet_yok", "ton_internet_var", "ton_onay", "ton_hazir", "ton_dinliyor"]
@@ -846,26 +867,15 @@ class SesYoneticisi:
 
     def akis_ac(self, ornekleme=24000):
         """
-        Akan ses için normal öncelikli oynatıcı açar (Gemini Live cevapları).
-        Acil ses çalıyorsa bitmesini bekler. "Dur" ya da kısa basış bu akışı
-        normal bir ses gibi keser. Sessiz moddaysa None döner.
+        Akan ses için normal öncelikli oynatıcı (Gemini Live cevapları). HEMEN döner:
+        acil ses çalıyorsa bitmesini oynatıcının kendi thread'i bekler. (Eskiden burada
+        beklenince Live'ın asyncio döngüsü donuyor, engel uyarıları sık çalınca cevaplar
+        hiç işlenemiyordu.) "Dur" ya da kısa basış bu akışı normal bir ses gibi keser.
+        Sessiz moddaysa None döner.
         """
         if self.sessiz:
             return None
-        with self._kosul:
-            while self._acil_mesgul:
-                self._kosul.wait(0.1)
-            try:
-                proc = subprocess.Popen(
-                    ["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
-                     f"--rate={ornekleme}", "--latency-msec=100",
-                     "--client-name=gozluk-canli", "--stream-name=cevap"],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                _log(f"⚠️  [SES] akış açılamadı: {e}")
-                return None
-            self._proc, self._proc_oncelik, self._proc_dosya = proc, ONCELIK_NORMAL, "<akış>"
-        return AkisOynatici(proc, self._bitti)
+        return AkisOynatici(self, ornekleme)
 
     def normal_kes(self):
         """O an çalan normal sesi (konuşmayı) keser. Kesildiyse True."""
@@ -902,13 +912,15 @@ class SesYoneticisi:
 # ═════════════════════════ İNTERNET İZLEYİCİ ═════════════════════════
 class AkisOynatici:
     """
-    Parça parça gelen PCM sesi çalar. Yazma kendi thread'inde yapılır, böylece
-    çağıran (asyncio döngüsü) pacat tamponu dolunca bloklanmaz.
+    Parça parça gelen PCM sesi çalar. Bekleme, süreç başlatma ve yazma kendi thread'inde
+    yapılır: çağıran (asyncio döngüsü) ne acil sesi ne de pacat tamponunu bekler.
     """
 
-    def __init__(self, proc, bitti_cagir):
-        self.proc = proc
-        self._bitti_cagir = bitti_cagir
+    def __init__(self, yonetici, ornekleme):
+        self.yonetici = yonetici
+        self.ornekleme = ornekleme
+        self.proc = None
+        self._kesildi = False
         self._kuyruk = deque()
         self._olay = threading.Event()
         self._kapaniyor = False
@@ -916,7 +928,8 @@ class AkisOynatici:
 
     @property
     def kesildi(self):
-        return getattr(self.proc, "kesildi", False) or self.proc.poll() is not None
+        p = self.proc
+        return self._kesildi or (p is not None and (getattr(p, "kesildi", False) or p.poll() is not None))
 
     def yaz(self, veri):
         if self.kesildi:
@@ -931,38 +944,63 @@ class AkisOynatici:
         self._olay.set()
 
     def kes(self):
-        self.proc.kesildi = True
-        try:
-            self.proc.terminate()
-        except Exception:
-            pass
+        self._kesildi = True
+        p = self.proc
+        if p is not None:
+            p.kesildi = True
+            try:
+                p.terminate()
+            except Exception:
+                pass
         self.bitir()
 
+    def _baslat(self):
+        """Acil ses bitene kadar bekler, sonra pacat'ı normal öncelikli ses olarak kaydeder."""
+        y = self.yonetici
+        with y._kosul:
+            while y._acil_mesgul and not self._kesildi:
+                y._kosul.wait(0.1)
+            if self._kesildi:
+                return False
+            try:
+                self.proc = subprocess.Popen(
+                    ["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
+                     f"--rate={self.ornekleme}", "--latency-msec=100",
+                     "--client-name=gozluk-canli", "--stream-name=cevap"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                _log(f"⚠️  [SES] akış açılamadı: {e}")
+                self._kesildi = True
+                return False
+            y._proc, y._proc_oncelik, y._proc_dosya = self.proc, ONCELIK_NORMAL, "<akış>"
+        return True
+
     def _yazici(self):
-        try:
-            while True:
-                self._olay.wait()
-                self._olay.clear()
-                while self._kuyruk:
-                    veri = self._kuyruk.popleft()
-                    if self.kesildi:
-                        self._kuyruk.clear()
+        if self._baslat():
+            try:
+                while True:
+                    self._olay.wait()
+                    self._olay.clear()
+                    while self._kuyruk:
+                        veri = self._kuyruk.popleft()
+                        if self.kesildi:
+                            self._kuyruk.clear()
+                            break
+                        self.proc.stdin.write(veri)
+                        self.proc.stdin.flush()
+                    if self._kapaniyor or self.kesildi:
                         break
-                    self.proc.stdin.write(veri)
-                    self.proc.stdin.flush()
-                if self._kapaniyor or self.kesildi:
-                    break
-        except Exception:
-            pass  # süreç öldürüldüyse boru kırılır
-        try:
-            self.proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            self.proc.wait(timeout=30)
-        except Exception:
-            self.proc.kill()
-        self._bitti_cagir(self.proc)
+            except Exception:
+                pass  # süreç öldürüldüyse boru kırılır
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self.proc.wait(timeout=30)
+            except Exception:
+                self.proc.kill()
+            self.yonetici._bitti(self.proc)
 
 
 class InternetIzleyici(threading.Thread):

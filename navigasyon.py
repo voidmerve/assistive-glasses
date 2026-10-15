@@ -38,6 +38,8 @@ VARIS_M = 15
 SAPMA_M = 35
 SAPMA_SURE_S = 8
 KOTU_GPS_M = 50
+SAPMA_GPS_M = 25          # sapma kararı için GPS bundan iyi olmalı (iç mekânda GPS 30-60 m oynar)
+YENIDEN_HESAP_ARALIK_S = 30
 
 
 # ═════════════ geometri ═════════════
@@ -159,9 +161,15 @@ class OSMSaglayici:
             if bekle > 0:
                 time.sleep(bekle)
             OSMSaglayici._son_istek = time.time()
-        r = requests.get(url, params=params, headers={"User-Agent": KULLANICI_AJANI}, timeout=12)
-        r.raise_for_status()
-        return r.json()
+        for deneme in range(3):  # kısa ağ kopmalarında (ad çözümleme hatası) tekrar dene
+            try:
+                r = requests.get(url, params=params, headers={"User-Agent": KULLANICI_AJANI}, timeout=12)
+                r.raise_for_status()
+                return r.json()
+            except requests.ConnectionError:
+                if deneme == 2:
+                    raise
+                time.sleep(1.5)
 
     def adres_bul(self, sorgu, yakin=None):
         p = {"q": sorgu, "format": "json", "limit": 1, "accept-language": "tr", "countrycodes": "tr"}
@@ -307,6 +315,8 @@ class Navigasyon:
         self.ilerleme = 0.0  # rota üzerinde yürünen metre
         self._yaklasma_soylendi = False
         self._sapma_basi = None
+        self._son_yeniden_hesap = 0.0
+        self._son_baslat = (None, 0.0, "")  # (hedef, zaman, özet): aynı istek tekrar gelirse
         self._kilit = threading.RLock()
 
     # ---------- sağlayıcı ----------
@@ -337,6 +347,9 @@ class Navigasyon:
     # ---------- komutlar (bloklayıcı, ağ kullanır) ----------
     def baslat(self, hedef_metni):
         """Rota hesaplar, söylenecek özeti döner."""
+        h, zaman, ozet = self._son_baslat
+        if self.aktif and h == hedef_metni and self.saat() - zaman < 30:
+            return ozet  # yapay zekâ fonksiyonu art arda iki kez çağırdı: yeniden hesaplama
         bas = self.guncel_konum()
         if bas is None:
             return "Konumunu bilmiyorum. Telefonda konum sayfasını aç."
@@ -358,8 +371,10 @@ class Navigasyon:
         self._bildir()
         ilk = rota.adimlar[0].metin if rota.adimlar else "yürümeye başla"
         not_ = "" if self.gps_var else " Telefon konumu gelmediği için test konumu kullanıldı."
-        return (f"Rota hazır: {hedef_adi}, {mesafe_metni(rota.toplam_m)}, yaklaşık "
+        ozet = (f"Rota hazır: {hedef_adi}, {mesafe_metni(rota.toplam_m)}, yaklaşık "
                 f"{sure_metni(rota.sure_s)} yürüyüş. İlk olarak {ilk}.{not_}")
+        self._son_baslat = (hedef_metni, self.saat(), ozet)
+        return ozet
 
     def durdur(self):
         with self._kilit:
@@ -420,12 +435,17 @@ class Navigasyon:
                 a = r.adimlar[self.adim]
                 self._soyle(f"{mesafe_metni(kalan)} sonra {a.metin}.", a.yon)
                 self._yaklasma_soylendi = True
-        # Rotadan sapma: bütün çizgiye uzaklık
+        # Rotadan sapma: bütün çizgiye uzaklık. GPS kötüyse (iç mekân) karar verme.
+        if self.dogruluk is not None and self.dogruluk > SAPMA_GPS_M:
+            self._sapma_basi = None
+            return
         if cizgiye_mesafe_m(p, r.cizgi) > SAPMA_M:
             if self._sapma_basi is None:
                 self._sapma_basi = self.saat()
-            elif self.saat() - self._sapma_basi >= SAPMA_SURE_S:
+            elif (self.saat() - self._sapma_basi >= SAPMA_SURE_S
+                  and self.saat() - self._son_yeniden_hesap >= YENIDEN_HESAP_ARALIK_S):
                 self._sapma_basi = None
+                self._son_yeniden_hesap = self.saat()
                 threading.Thread(target=self._yeniden_hesapla, daemon=True).start()
         else:
             self._sapma_basi = None
