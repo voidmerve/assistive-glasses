@@ -110,6 +110,19 @@ def mesafe_yazisi(m):
     return f"{m:.1f}".replace(".", ",") + " metre"
 
 
+# Kalibrasyon yapılana kadar kendiliğinden metre söylenmez, "yakında / uzakta" denir.
+# Metre sadece kullanıcı "ne kadar uzak" diye sorunca (mesafe_olc) verilir. 1 = her yerde metre.
+MESAFE_SAYILI = (os.getenv("MESAFE_SAYILI") or "0").strip() == "1"
+
+
+def yakinlik_yazisi(m):
+    if m < 1.0:
+        return "çok yakında"
+    if m < 2.5:
+        return "yakında"
+    return "uzakta"
+
+
 class KameraMesafe(threading.Thread):
     """
     kare_al: f() → BGR kare (picamera2 RGB888 biçimi BGR sıralıdır)
@@ -405,6 +418,12 @@ class KameraMesafe(threading.Thread):
         o = self.guncel()
         if o is None:
             return ""
+        if not MESAFE_SAYILI:
+            parcalar = [f"tam önde (saat 12) {yakinlik_yazisi(o['tam_on'])}"]
+            for n in o["nesneler"][:en_fazla]:
+                parcalar.append(f"{n['ad']} saat {n['saat']} yönünde, {yakinlik_yazisi(n['mesafe'])}")
+            return ("Kamera yakınlık tahmini: " + "; ".join(parcalar) + ". Metre söyleme; sadece "
+                    "'çok yakında', 'yakında', 'uzakta' de.")
         parcalar = [f"tam önde (saat 12) yaklaşık {mesafe_yazisi(o['tam_on'])}"]
         for n in o["nesneler"][:en_fazla]:
             parcalar.append(f"{n['ad']} saat {n['saat']} yönünde, yaklaşık {mesafe_yazisi(n['mesafe'])}")

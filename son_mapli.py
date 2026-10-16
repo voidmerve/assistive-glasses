@@ -696,7 +696,8 @@ def _duzey_kurali():
 def _mesafe_bilgisi():
     bilgi = mesafe_bilgisi_metni()
     return (bilgi + " " if bilgi else "") + \
-        "Bunlar dışında mesafe uydurma. Mesafe söylerken ondalığı virgülle yaz (1,5 metre). "
+        "Bunlar dışında mesafe uydurma. " + \
+        ("Mesafe söylerken ondalığı virgülle yaz (1,5 metre). " if mesafe.MESAFE_SAYILI else "Metre söyleme. ")
 
 
 def istem_tarif():
