@@ -31,8 +31,10 @@ import json
 import os
 import subprocess
 import sys
+import math
 import time
 
+import cv2
 import numpy as np
 
 import mesafe
@@ -40,6 +42,7 @@ from goru import NesneTanima
 
 BURASI = os.path.dirname(os.path.abspath(__file__))
 CSV_DOSYASI = os.path.join(BURASI, "kalibrasyon_olcumleri.csv")
+KARE_KLASORU = os.path.join(BURASI, "kalibrasyon_kareler")
 
 
 def kamera_ac():
@@ -52,23 +55,49 @@ def kamera_ac():
 
 
 def kisi_tahmini(olcer, yolo, kare):
-    """Karedeki (ortaya en yakın) insanın üzerindeki ham model tahmini; insan yoksa orta bölge."""
+    """Ortaya en yakın insan için (model tahmini, kutu boyutundan tahmin, kutu); insan yoksa None."""
     h, w = kare.shape[:2]
     yolo.isle(kare)
+    insanlar = [t for t in yolo.son if t[1] == "person"]
+    if not insanlar:
+        return None
     harita, (kx0, ky0, kx1, ky1) = olcer.ham_derinlik(kare)
     sx, sy = mesafe.GIRIS_W / (kx1 - kx0), mesafe.GIRIS_H / (ky1 - ky0)
-    insanlar = [t for t in yolo.son if t[1] == "person"]
-    if insanlar:
-        _, _, _, (x1, y1, x2, y2) = min(insanlar, key=lambda t: abs((t[3][0] + t[3][2]) / 2 - w / 2))
-        a1 = int((x1 - kx0 + (x2 - x1) * 0.30) * sx)
-        a2 = int((x1 - kx0 + (x2 - x1) * 0.70) * sx)
-        b1 = int((y1 - ky0 + (y2 - y1) * 0.25) * sy)
-        b2 = int((y1 - ky0 + (y2 - y1) * 0.75) * sy)
-        a1, a2 = max(0, a1), min(mesafe.GIRIS_W, max(a1 + 1, a2))
-        b1, b2 = max(0, b1), min(mesafe.GIRIS_H, max(b1 + 1, b2))
-        return float(np.median(harita[b1:b2, a1:a2])), "insan"
-    H, W = harita.shape
-    return float(np.median(harita[int(H * 0.35):int(H * 0.65), int(W * 0.4):int(W * 0.6)])), "orta bölge"
+    x1, y1, x2, y2 = min(insanlar, key=lambda t: abs((t[3][0] + t[3][2]) / 2 - w / 2))[3]
+    a1 = int((x1 - kx0 + (x2 - x1) * 0.30) * sx)
+    a2 = int((x1 - kx0 + (x2 - x1) * 0.70) * sx)
+    b1 = int((y1 - ky0 + (y2 - y1) * 0.25) * sy)
+    b2 = int((y1 - ky0 + (y2 - y1) * 0.75) * sy)
+    a1, a2 = max(0, min(mesafe.GIRIS_W - 1, a1)), min(mesafe.GIRIS_W, max(a1 + 1, a2))
+    b1, b2 = max(0, min(mesafe.GIRIS_H - 1, b1)), min(mesafe.GIRIS_H, max(b1 + 1, b2))
+    model_d = float(np.median(harita[b1:b2, a1:a2]))
+    # Programdaki geometrik ölçümün aynısı (yakında program buna güvenir)
+    odak = (h / 2) / math.tan(math.radians(mesafe.KAMERA_DIKEY_FOV / 2))
+    geo = None
+    if (y2 - y1) > 1.8 * (x2 - x1) and y1 > 4 and y2 < h - 4:
+        geo = odak * mesafe.BILINEN_BOY["person"] / (y2 - y1)
+    elif x1 > 4 and x2 < w - 4:
+        geo = odak * mesafe.BILINEN_GENISLIK["person"] / (x2 - x1)
+    return model_d, geo, (int(x1), int(y1), int(x2), int(y2))
+
+
+def kare_kaydet(kare, kutu, hedef):
+    os.makedirs(KARE_KLASORU, exist_ok=True)
+    k = kare.copy()
+    if kutu:
+        cv2.rectangle(k, kutu[:2], kutu[2:], (0, 255, 0), 3)
+    x0, y0, x1, y1 = mesafe.KameraMesafe.kirpma_kutusu(k.shape[1], k.shape[0])
+    cv2.rectangle(k, (x0, y0), (x1, y1), (255, 0, 0), 2)  # derinlik modelinin gördüğü bölge
+    cv2.imwrite(os.path.join(KARE_KLASORU, f"{hedef:g}m.jpg"), cv2.resize(k, (640, 480)))
+
+
+def tekdüze_aralik(olcumler):
+    """Uzaktan yakına giderken model tahmininin de azaldığı en geniş aralık (yakında model şaşıyor)."""
+    sirali = sorted(olcumler, key=lambda o: o[0])
+    bas = len(sirali) - 1
+    while bas > 0 and sirali[bas - 1][1] < sirali[bas][1]:
+        bas -= 1
+    return sirali[bas:], sirali[:bas]
 
 
 def egri_kur(noktalar):
@@ -128,45 +157,74 @@ def main():
 
     olcumler = []
     for hedef in a.mesafeler:
-        input(f"→ Kişi kameranın tam karşısında {hedef:g} m'de, ayakta dursun. Hazır olunca Enter...")
-        degerler, kaynaklar = [], set()
-        for _ in range(a.kare):
-            kare = kamera.capture_array()
-            if float(kare.mean()) < mesafe.KARANLIK_ESIGI:
-                print("   ⚠️  Görüntü çok karanlık, ışığı açın")
-                continue
-            d, kaynak = kisi_tahmini(olcer, yolo, kare)
-            degerler.append(d)
-            kaynaklar.add(kaynak)
-            time.sleep(0.3)
-        if not degerler:
-            print("   Ölçüm alınamadı, bu mesafe atlandı")
+        while True:
+            input(f"→ Kişi kameranın tam karşısında {hedef:g} m'de, ayakta dursun. Hazır olunca Enter...")
+            modeller, geolar, kutu, son_kare = [], [], None, None
+            for _ in range(a.kare * 3):
+                if len(modeller) >= a.kare:
+                    break
+                kare = kamera.capture_array()
+                son_kare = kare
+                if float(kare.mean()) < mesafe.KARANLIK_ESIGI:
+                    continue
+                sonuc = kisi_tahmini(olcer, yolo, kare)
+                if sonuc:
+                    modeller.append(sonuc[0])
+                    if sonuc[1]:
+                        geolar.append(sonuc[1])
+                    kutu = sonuc[2]
+                time.sleep(0.2)
+            kare_kaydet(son_kare, kutu, hedef)
+            if len(modeller) >= max(2, a.kare // 2):
+                break
+            parlak = float(son_kare.mean())
+            neden = "görüntü karanlık (ışık / lens kapağı?)" if parlak < mesafe.KARANLIK_ESIGI else \
+                "kameraya insan görünmüyor (kamera kişiye dönük mü?)"
+            print(f"   ⚠️  Ölçüm alınamadı: {neden}. Görüntü: kalibrasyon_kareler/{hedef:g}m.jpg")
+            if input("   Tekrar denemek için Enter, bu mesafeyi atlamak için 'a' + Enter: ").strip().lower() == "a":
+                modeller = []
+                break
+        if not modeller:
             continue
-        tahmin = float(np.median(degerler))
-        yayilim = float(np.std(degerler))
-        olcumler.append((hedef, tahmin, yayilim, "/".join(sorted(kaynaklar))))
-        print(f"   model {tahmin:.2f} m (±{yayilim:.2f}, {'/'.join(sorted(kaynaklar))}) → gerçek {hedef:g} m\n")
+        tahmin, yayilim = float(np.median(modeller)), float(np.std(modeller))
+        geo = float(np.median(geolar)) if geolar else None
+        olcumler.append((hedef, tahmin, yayilim, geo))
+        geo_y = f"{geo:.2f} m" if geo else "—"
+        print(f"   model {tahmin:.2f} m (±{yayilim:.2f}), kutu boyutu {geo_y} → gerçek {hedef:g} m\n")
     kamera.stop()
 
-    if len(olcumler) < 3:
-        print("En az 3 mesafe gerekli, kalibrasyon kaydedilmedi.")
+    kullanilan, atilan = tekdüze_aralik(olcumler)
+    if atilan:
+        print(f"\nℹ️  {', '.join(f'{o[0]:g}' for o in atilan)} m: model burada şaşıyor (yakını uzak sanıyor), eğriye "
+              "alınmadı. Bu yakınlıkta program kutu boyutuna güvenir (tablodaki 'kutu' sütunu).")
+    if len(kullanilan) < 3:
+        print("Eğri için tutarlı en az 3 mesafe gerekli, kalibrasyon kaydedilmedi.")
         return
 
-    noktalar = [(t, g) for g, t, _, _ in olcumler]
+    noktalar = [(t, g) for g, t, _, _ in kullanilan]
     egri = egri_kur(noktalar)
-    print("\n  Gerçek | Model  | Kalibrasyonsuz hata | Kalibrasyonlu hata (birini dışarıda bırak)")
+    print("\n  Gerçek | Model (hata)     | Kutu boyutu (hata) | Kalibrasyonlu (hata, birini dışarıda bırak)")
     satirlar, ham_hatalar, kal_hatalar = [], [], []
-    for i, (gercek, tahmin, yayilim, kaynak) in enumerate(olcumler):
-        digerleri = egri_kur([n for j, n in enumerate(noktalar) if j != i])
-        duzeltilmis = egri_tahmin(digerleri, tahmin) if len(digerleri) >= 2 else tahmin
+    for gercek, tahmin, yayilim, geo in olcumler:
+        icinde = (tahmin, gercek) in noktalar
+        digerleri = egri_kur([n for n in noktalar if n != (tahmin, gercek)])
+        duzeltilmis = egri_tahmin(digerleri, tahmin) if icinde and len(digerleri) >= 2 else None
         ham_h = (tahmin - gercek) / gercek * 100
-        kal_h = (duzeltilmis - gercek) / gercek * 100
-        ham_hatalar.append(abs(ham_h))
-        kal_hatalar.append(abs(kal_h))
-        print(f"  {gercek:5.2f} m | {tahmin:5.2f} m | {ham_h:+6.0f} % | {duzeltilmis:5.2f} m  {kal_h:+6.0f} %")
-        satirlar.append([gercek, round(tahmin, 3), round(yayilim, 3), kaynak, round(ham_h, 1),
-                         round(duzeltilmis, 3), round(kal_h, 1)])
-    print(f"\n  Ortalama mutlak hata: kalibrasyonsuz %{np.mean(ham_hatalar):.0f} → kalibrasyonlu %{np.mean(kal_hatalar):.0f}")
+        geo_h = (geo - gercek) / gercek * 100 if geo else None
+        kal_h = (duzeltilmis - gercek) / gercek * 100 if duzeltilmis is not None else None
+        if kal_h is not None:
+            ham_hatalar.append(abs(ham_h))
+            kal_hatalar.append(abs(kal_h))
+        g_y = f"{geo:5.2f} m {geo_h:+5.0f} %" if geo else "      —        "
+        k_y = f"{duzeltilmis:5.2f} m {kal_h:+5.0f} %" if kal_h is not None else "— (eğri dışı)"
+        print(f"  {gercek:5.2f} m | {tahmin:5.2f} m {ham_h:+5.0f} % | {g_y}   | {k_y}")
+        satirlar.append([gercek, round(tahmin, 3), round(yayilim, 3), None if geo is None else round(geo, 3),
+                         None if geo_h is None else round(geo_h, 1), round(ham_h, 1),
+                         None if duzeltilmis is None else round(duzeltilmis, 3),
+                         None if kal_h is None else round(kal_h, 1)])
+    print(f"\n  Eğri aralığında ortalama mutlak hata: kalibrasyonsuz %{np.mean(ham_hatalar):.0f} → "
+          f"kalibrasyonlu %{np.mean(kal_hatalar):.0f}")
+    print(f"  Her mesafenin görüntüsü: {KARE_KLASORU}/")
 
     with open(mesafe.KALIBRASYON_DOSYASI, "w") as f:
         json.dump({"tarih": time.strftime("%Y-%m-%d %H:%M"), "kirpma": mesafe.DERINLIK_KIRPMA,
@@ -175,8 +233,8 @@ def main():
     with open(CSV_DOSYASI, "a", newline="") as f:
         w = csv.writer(f)
         if yeni:
-            w.writerow(["tarih", "gercek_m", "model_m", "yayilim_m", "kaynak", "kalibrasyonsuz_hata_yuzde",
-                        "kalibrasyonlu_m", "kalibrasyonlu_hata_yuzde"])
+            w.writerow(["tarih", "gercek_m", "model_m", "yayilim_m", "kutu_m", "kutu_hata_yuzde",
+                        "kalibrasyonsuz_hata_yuzde", "kalibrasyonlu_m", "kalibrasyonlu_hata_yuzde"])
         for s in satirlar:
             w.writerow([time.strftime("%Y-%m-%d %H:%M")] + s)
     print(f"\n✓ {mesafe.KALIBRASYON_DOSYASI} kaydedildi. Programı başlatın: systemctl --user start asistif-gozluk")
