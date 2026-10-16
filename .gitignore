@@ -22,3 +22,4 @@ tasarim/__pycache__/
 !servis/
 !servis/**
 !kulaklik.py
+!kalibrasyon.py

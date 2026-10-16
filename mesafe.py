@@ -81,6 +81,12 @@ GIRIS_W, GIRIS_H = 252, 196  # 14'ün katları (ViT yama boyu)
 ORTALAMA = np.array([0.485, 0.456, 0.406], np.float32)
 SAPMA = np.array([0.229, 0.224, 0.225], np.float32)
 
+# Derinlik modeline karenin sadece ortası verilir (genişliğin bu oranı). Geniş açılı lensin
+# bükük kenarları modeli yanıltıyor; ortadaki ~66° normal kameraya benzer. 1 = kırpma yok.
+DERINLIK_KIRPMA = min(1.0, max(0.4, _sayi("DERINLIK_KIRPMA", 0.75)))
+# Ölçümle çıkarılmış düzeltme eğrisi (kalibrasyon.py yazar): model tahmini → gerçek mesafe
+KALIBRASYON_DOSYASI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kalibrasyon.json")
+
 # Kare bundan karanlıksa (0-255) mesafe ölçülmez: model simsiyah kareye de bir mesafe uyduruyor
 KARANLIK_ESIGI = _sayi("KARANLIK_ESIGI", 15)
 # Genişliği yaklaşık bilinen sınıflar (m): yakında kutu üstten/alttan kesilince boy yerine kullanılır
@@ -130,6 +136,7 @@ class KameraMesafe(threading.Thread):
         self._son_uyari = 0.0
         self.son_engel = None
         self.karanlik = False      # son kare karanlık mıydı
+        self.egri = self._egri_yukle()  # (tahmin dizisi, gerçek dizisi) ya da None
         self.durdur_olayi = threading.Event()
         self._kilit = threading.Lock()
 
@@ -181,6 +188,46 @@ class KameraMesafe(threading.Thread):
                 self.durdur_olayi.wait(5)
             self.durdur_olayi.wait(max(0.1, self.aralik - (time.time() - t0)))
 
+    @staticmethod
+    def _egri_yukle():
+        try:
+            import json
+            with open(KALIBRASYON_DOSYASI) as f:
+                k = json.load(f)
+            noktalar = sorted(k["noktalar"])  # [[model tahmini, gerçek], ...]
+            if len(noktalar) < 2 or k.get("kirpma") != DERINLIK_KIRPMA:
+                print("⚠️  kalibrasyon.json farklı bir kırpma ayarıyla yapılmış ya da eksik, kullanılmıyor")
+                return None
+            print(f"📏 Mesafe kalibrasyonu yüklendi ({len(noktalar)} nokta, {k.get('tarih', '?')})")
+            return np.array([n[0] for n in noktalar]), np.array([n[1] for n in noktalar])
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            print(f"⚠️  kalibrasyon.json okunamadı: {e}")
+            return None
+
+    def egri_uygula(self, d):
+        """Model tahmini → gerçek mesafe. Noktalar arası doğrusal, uçlarda en yakın noktanın oranıyla."""
+        if self.egri is None:
+            return d
+        tahmin, gercek = self.egri
+        sonuc = np.interp(d, tahmin, gercek)
+        sonuc = np.where(d < tahmin[0], d * gercek[0] / tahmin[0], sonuc)
+        return np.where(d > tahmin[-1], d * gercek[-1] / tahmin[-1], sonuc)
+
+    @staticmethod
+    def kirpma_kutusu(w, h):
+        """Derinlik modeline verilen orta bölge (x0, y0, x1, y1), en-boy oranı korunur."""
+        kw, kh = int(w * DERINLIK_KIRPMA), int(h * DERINLIK_KIRPMA)
+        x0, y0 = (w - kw) // 2, (h - kh) // 2
+        return x0, y0, x0 + kw, y0 + kh
+
+    def ham_derinlik(self, kare_bgr):
+        """Kırpılmış orta bölgenin model çıktısı (metre, düzeltmesiz) ve kırpma kutusu."""
+        h, w = kare_bgr.shape[:2]
+        x0, y0, x1, y1 = self.kirpma_kutusu(w, h)
+        return self.derinlik_haritasi(kare_bgr[y0:y1, x0:x1]), (x0, y0, x1, y1)
+
     def derinlik_haritasi(self, kare_bgr):
         """BGR kare → metre cinsinden derinlik (GIRIS_H × GIRIS_W)."""
         rgb = cv2.cvtColor(cv2.resize(kare_bgr, (GIRIS_W, GIRIS_H), interpolation=cv2.INTER_AREA),
@@ -203,8 +250,13 @@ class KameraMesafe(threading.Thread):
             self.karanlik, self.engel_seviye, self.son_engel = True, 0, None
             return
         self.karanlik = False
-        ham = self.derinlik_haritasi(kare) * DERINLIK_CARPAN  # sabit lens düzeltmesi
-        derinlik = ham * self.olcek                            # + boy kalibrasyonunun ince ayarı
+        model, (kx0, ky0, kx1, ky1) = self.ham_derinlik(kare)
+        if self.egri is not None:
+            ham = self.egri_uygula(model)        # ölçümle çıkarılmış düzeltme eğrisi
+            self.olcek = 1.0                     # eğri varken boy kalibrasyonu karışmasın
+        else:
+            ham = model * DERINLIK_CARPAN        # sabit lens düzeltmesi
+        derinlik = ham * self.olcek              # + boy kalibrasyonunun ince ayarı
         odak = (h / 2) / math.tan(math.radians(KAMERA_DIKEY_FOV / 2))   # piksel
         yatay_fov = math.degrees(2 * math.atan((w / 2) / odak))
 
@@ -216,15 +268,22 @@ class KameraMesafe(threading.Thread):
 
         # Nesneler: kutunun alt-orta kısmındaki medyan derinlik (arka planı dışarıda bırakır)
         nesneler, oranlar = [], []
-        sx, sy = GIRIS_W / w, GIRIS_H / h
+        # Kutular tam karede; derinlik haritası kırpılmış orta bölgede: koordinatı dönüştür
+        sx, sy = GIRIS_W / (kx1 - kx0), GIRIS_H / (ky1 - ky0)
         for ad, sinif, guven, (x1, y1, x2, y2) in self.tespitler_al():
-            a1, a2 = int(x1 * sx + (x2 - x1) * sx * 0.25), int(x1 * sx + (x2 - x1) * sx * 0.75)
-            b1, b2 = int(y1 * sy + (y2 - y1) * sy * 0.35), int(y1 * sy + (y2 - y1) * sy * 0.90)
-            parca = ham[max(0, b1):max(b1 + 1, b2), max(0, a1):max(a1 + 1, a2)]
-            if parca.size == 0:
-                continue
-            d_ham = float(np.median(parca))
-            mesafe, kaynak = d_ham * self.olcek, "derinlik"
+            a1 = int((x1 - kx0 + (x2 - x1) * 0.25) * sx)
+            a2 = int((x1 - kx0 + (x2 - x1) * 0.75) * sx)
+            b1 = int((y1 - ky0 + (y2 - y1) * 0.35) * sy)
+            b2 = int((y1 - ky0 + (y2 - y1) * 0.90) * sy)
+            a1, a2 = max(0, min(GIRIS_W - 1, a1)), max(0, min(GIRIS_W, a2))
+            b1, b2 = max(0, min(GIRIS_H - 1, b1)), max(0, min(GIRIS_H, b2))
+            parca = ham[b1:max(b1 + 1, b2), a1:max(a1 + 1, a2)]
+            merkez_icinde = kx0 <= (x1 + x2) / 2 <= kx1 and ky0 <= (y1 + y2) / 2 <= ky1
+            if parca.size and merkez_icinde:
+                d_ham = float(np.median(parca))
+                mesafe, kaynak = d_ham * self.olcek, "derinlik"
+            else:
+                d_ham, mesafe, kaynak = None, None, None  # kırpılan kenarda: sadece geometrik ölçüm
             # Geometrik ölçüm (iğne deliği kamera): nesnenin piksel boyu/genişliği ve gerçek boyutu.
             # Yakında derinlik modeli bağlamı kaybedip mesafeyi büyütüyor; bu ölçüm orada daha güvenilir.
             geo, geo_kaynak = None, None
@@ -233,19 +292,22 @@ class KameraMesafe(threading.Thread):
             yatay_tam = x1 > 4 and x2 < w - 4
             if sinif in BILINEN_BOY and ayakta and dikey_tam and (y2 - y1) > 20:
                 geo, geo_kaynak = odak * BILINEN_BOY[sinif] / (y2 - y1), "boy"
-                if 0.3 < geo < 30:
+                if 0.3 < geo < 30 and d_ham is not None and self.egri is None:
                     oranlar.append(geo / max(d_ham, 0.1))  # kalibrasyona sadece boy ölçümü girer
             elif sinif in BILINEN_GENISLIK and yatay_tam and (x2 - x1) > 20:
                 geo, geo_kaynak = odak * BILINEN_GENISLIK[sinif] / (x2 - x1), "genişlik"
             if geo is not None and 0.2 < geo < 30:
                 cok_yakin = (x2 - x1) * (y2 - y1) > 0.33 * w * h  # nesne karenin üçte birinden büyük
-                if cok_yakin:
+                if cok_yakin or mesafe is None:
                     mesafe, kaynak = geo, geo_kaynak
                 else:
                     mesafe, kaynak = 0.4 * mesafe + 0.6 * geo, f"derinlik+{geo_kaynak}"
+            if mesafe is None:
+                continue
             nesneler.append({"ad": ad, "sinif": sinif, "saat": saat_yonu((x1 + x2) / 2 / w, yatay_fov),
                              "mesafe": round(mesafe, 2), "kaynak": kaynak, "guven": round(guven, 2),
-                             "kutu": [int(x1), int(y1), int(x2), int(y2)]})
+                             "kutu": [int(x1), int(y1), int(x2), int(y2)],
+                             "ham": None if d_ham is None else round(d_ham, 3)})
         self._olcek_guncelle(oranlar)
         nesneler.sort(key=lambda n: n["mesafe"])
 
