@@ -117,6 +117,13 @@ OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Ta
   soracak: "koltuğun üzerinde, sağ kolçağın yanında", "yemek masasında, meyve kasesinin yanında",
   "kapının yanındaki dolabın üstünde". ASLA saat yönü, "önünde", "solunda", "karşında" gibi bakış
   yönüne bağlı ifadeler kullanma. Emin değilsen ya da görmüyorsan fonksiyon çağırma.
+- "OTOMATİK TARİF" (sokak modunda 30 sn'de bir, kullanıcı sormadı): Önündeki en önemli şeyi tek kısa
+  cümleyle söyle, saat yönü ve mesajdaki mesafeyle. Örnek: "Saat 12 yönünde, yaklaşık iki metrede bank
+  var." Önünde dikkat çeken bir şey yoksa sadece "Önün açık." de. Bir önceki otomatik tarifle aynı şeyi
+  görüyorsan yine kısa söyle ama aynı cümleyi kelimesi kelimesine tekrarlama.
+- "OTOMATİK ÇEVRE ÖZETİ" (sokak modunda dakikada bir): Çevreyi 2-3 kısa cümleyle anlat: nerede
+  olduğun (kaldırım, cadde, park, bina girişi, iç mekân), önemli nesneler ve saat yönleri, okunabilen
+  tabela ve yazılar. Selamlama yok.
 - "SÖYLE:" ile başlayan mesajda sadece verilen cümleyi aynen söyle, hiçbir şey ekleme.
 - "YÖNLENDİR:" ile başlayan mesajda verilen yönlendirmeyi söyle. Görüntüde dönüş yerini belirleyen
   belirgin bir işaret (dükkân, tabela, durak) varsa kısaca ekle, örneğin "eczanenin önünden".
@@ -209,6 +216,7 @@ class CanliAsistan:
         self._son_kucuk_kare = None
         self._son_gozcu = 0.0
         self.sayac = {"gozcu": 0, "bildir": 0, "esya_kaydet": 0}
+        self._son_soylenenler = deque(maxlen=6)  # (zaman, metin): otomatik anlatım aynı şeyi tekrarlamasın
 
     # ═════════════ dışarıdan (başka thread'lerden) çağrılanlar ═════════════
     def baslat(self):
@@ -248,6 +256,23 @@ class CanliAsistan:
 
     def soyle(self, metin):
         return self._gonder("soyle", metin)
+
+    def otomatik_tarif(self, sensor_m=None):
+        """Sokak modunda 30 sn'de bir: önündeki en önemli şey (kullanıcı sormadan, sesli)."""
+        return self._gonder("otomatik", "OTOMATİK TARİF", sensor_m)
+
+    def cevre_ozeti(self, sensor_m=None):
+        """Sokak modunda dakikada bir: genel çevre (kullanıcı sormadan, sesli)."""
+        return self._gonder("otomatik", "OTOMATİK ÇEVRE ÖZETİ", sensor_m)
+
+    @property
+    def mesgul(self):
+        """Kullanıcı konuşuyor, bir cevap çalıyor ya da bekleniyor."""
+        return self.dinliyor or self._tur is not None or bool(self._bekleyen_turlar)
+
+    @property
+    def son_etkilesim(self):
+        return self._son_etkilesim
 
     def yonlendir(self, metin):
         return self._gonder("yonlendir", metin)
@@ -392,6 +417,16 @@ class CanliAsistan:
                 self.sayac["gozcu"] += 1
                 await self._metin_turu(oturum, TUR_GOZCU,
                                        f"{komut[1]} {self.mesafe_bilgisi(None)} {self._baglam()}", [komut[2]])
+            elif tur == "otomatik":
+                # Kullanıcı etkileşimi sayılmaz (_son_etkilesim değişmez): kendi zamanlayıcısı var
+                simdi = time.monotonic()
+                yakin = [m for z, m in self._son_soylenenler if simdi - z < 75]
+                gecmis = (" Son bir dakikada söylediklerin: " + " | ".join(yakin) +
+                          ". Sahne değişmediyse bunları tekrarlama: çok kısa söyle ya da yeni bir ayrıntı ver."
+                          ) if yakin else ""
+                await self._metin_turu(oturum, TUR_CEVAP,
+                                       f"{komut[1]}: {self.mesafe_bilgisi(komut[2])} {self._baglam()}{gecmis}",
+                                       [self.kare_al()])
             elif tur == "soyle":
                 await self._metin_turu(oturum, TUR_CEVAP, f"SÖYLE: {komut[1]}")
             elif tur == "yonlendir":
@@ -525,6 +560,7 @@ class CanliAsistan:
         if yazi:
             print(f"📢 {yazi}" + (f"  (ilk ses {ilk:.1f} s)" if ilk is not None else ""))
             self.yayinla("gozluk", yazi)
+            self._son_soylenenler.append((time.monotonic(), yazi))
         if ilk is not None and not tur["atla"]:
             self.olcum("Live ilk ses", ilk)
         if tur["pcm"]:

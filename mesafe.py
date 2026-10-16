@@ -34,7 +34,7 @@ Kameradan engel uyarısı (KAMERA_UYARI=1):
 Ayarlar (.env):
   DERINLIK_ARALIK_S=0.6    # turlar arası mola (YOLO + derinlik bir tur ~1,3 sn)
   GORU_CEKIRDEK=3          # 4 çekirdeğin biri Live, ses ve panel için boş kalsın
-  ENGEL_UYARI_M=1.3
+  ENGEL_UYARI_M=1.5
   ENGEL_DUR_M=0.7
   KAMERA_DIKEY_FOV=67      # Camera Module 3 Wide dikey görüş açısı (derece)
   KAMERA_UYARI=1
@@ -61,7 +61,7 @@ def _sayi(ad, varsayilan):
 DERINLIK_ARALIK_S = _sayi("DERINLIK_ARALIK_S", 0.6)   # turlar arası mola; tur ~1,3 sn → ölçüm ~2 sn'de bir
 # Görü hattı en fazla bu kadar çekirdek kullanır: 4'ünü de alınca Live cevapları 5-15 sn gecikiyordu
 GORU_CEKIRDEK = int(_sayi("GORU_CEKIRDEK", 3))
-ENGEL_UYARI_M = _sayi("ENGEL_UYARI_M", 1.3)           # yürüme yolunda bundan yakın: "Önünde sandalye var"
+ENGEL_UYARI_M = _sayi("ENGEL_UYARI_M", 1.5)           # yürüme yolunda bundan yakın: "Önünde sandalye var"
 ENGEL_DUR_M = _sayi("ENGEL_DUR_M", 0.7)               # bundan yakın: bip + "Dur"
 ENGEL_TEKRAR_S = _sayi("ENGEL_TEKRAR_S", 8.0)         # engel durdukça hatırlatma aralığı
 KAMERA_DIKEY_FOV = _sayi("KAMERA_DIKEY_FOV", 67.0)

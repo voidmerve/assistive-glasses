@@ -8,7 +8,7 @@ burada karar verilir:
 
   olay : güvenlik ya da yön bulma için önemli (aşağı basamak, yaya geçidi,
          trafik ışığı rengi, gelen otobüsün numarası, çukur)
-         → hemen söylenir; aynı olay 20 sn içinde tekrar edilmez
+         → hemen söylenir; aynı olay 45 sn içinde tekrar edilmez
   engel: yoldaki ya da yakındaki engeller (park etmiş bisiklet, direk, insan grubu)
          → yerlerle aynı sıklık kuralı; aynı engel 2 dk içinde tekrar edilmez
   yer  : yön bulmaya yarayan yerler (eczane, market, durak, tabela)
@@ -23,7 +23,7 @@ import re
 import time
 
 SIKLIKLAR = {"az": 60.0, "orta": 30.0, "cok": 10.0}
-OLAY_TEKRAR_S = 20.0
+OLAY_TEKRAR_S = 45.0
 ENGEL_TEKRAR_S = 120.0
 YER_TEKRAR_S = 600.0
 BENZERLIK = 0.6

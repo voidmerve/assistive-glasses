@@ -9,9 +9,10 @@ Görme engelli kullanıcı için Türkçe konuşan akıllı gözlük (tez projes
                 cüzdan, telefon ve bilgisayarın yerini metin olarak hatırlar
                 ("masanın üzerinde, sol tarafta"); görüntü saklanmaz.
                 "Anahtarım nerede?" → "En son 10 dakika önce masanın üzerinde gördüm."
-    Sokak modu — akıllı anlatıcı (orta yol): yürürken susar; basamak, yaya geçidi,
-                trafik ışığı, gelen otobüs gibi olayları hemen, eczane, durak, tabela
-                gibi yerleri en fazla 30 sn'de bir söyler. "Daha çok/az anlat" ile değişir.
+    Sokak modu — anlatıcı: 30 sn'de bir önündeki en önemli şeyi, dakikada bir genel
+                çevreyi söyler; 1,5 m'den yakın engelde "Önünde sandalye var, sağdan geç",
+                çok yakında bip + "Dur". Basamak, yaya geçidi, trafik ışığı, gelen otobüs
+                gibi olayları hemen bildirir. "Daha çok/az anlat" süreleri yarıya/iki katına çeker.
     İki modda da: engel uyarısı (sensör, internetsiz), sorulara cevap, yazı ve para
     okuma, "ne görüyorsun" (zengin tarif), "çevreyi tara", navigasyon.
 
@@ -1015,6 +1016,45 @@ def canli_hazir():
     return canli is not None and canli.hazir and internet_var()
 
 
+# ───────────────── SOKAK MODU: OTOMATİK ANLATIM ─────────────────
+SOKAK_TARIF_S = float(os.getenv("SOKAK_TARIF_S") or 30)   # önündeki en önemli şey
+SOKAK_CEVRE_S = float(os.getenv("SOKAK_CEVRE_S") or 60)   # genel çevre özeti
+SIKLIK_CARPANI = {"az": 2.0, "orta": 1.0, "cok": 0.5}       # "daha az/çok anlat"
+
+
+def sokak_anlatimi():
+    """
+    Sokak modunda kullanıcı sormadan konuşur: SOKAK_TARIF_S'de bir önündeki en önemli şeyi,
+    SOKAK_CEVRE_S'de bir genel çevreyi. Kullanıcı konuşurken, bir cevap ya da uyarı çalarken,
+    son basıştan sonraki 10 sn içinde, "sessiz ol" denmişken ve kamera karanlıkken susar.
+    """
+    son_tarif = son_cevre = time.monotonic()
+    onceki_mod = None
+    while True:
+        time.sleep(1.0)
+        try:
+            simdi = time.monotonic()
+            if mod() != onceki_mod:  # sokak moduna geçince sayaçlar baştan başlasın
+                onceki_mod, son_tarif, son_cevre = mod(), simdi, simdi
+            if mod() != MOD_SOKAK or not canli_hazir() or ayarlar.get("konusma_duzeyi") == DUZEY_SESSIZ:
+                continue
+            if kamera_mesafe is not None and kamera_mesafe.karanlik:
+                continue
+            mesgul = (canli.mesgul or recorder.recording or ses_yoneticisi.normal_caliyor
+                      or ses_yoneticisi.acil_caliyor or simdi - canli.son_etkilesim < 10)
+            if mesgul:
+                continue
+            carpan = SIKLIK_CARPANI.get(anlatim.siklik, 1.0)
+            if simdi - son_cevre >= SOKAK_CEVRE_S * carpan:
+                son_cevre = son_tarif = simdi
+                canli.cevre_ozeti(guvenlik_sistemi.son_mesafe)
+            elif simdi - son_tarif >= SOKAK_TARIF_S * carpan:
+                son_tarif = simdi
+                canli.otomatik_tarif(guvenlik_sistemi.son_mesafe)
+        except Exception as e:
+            print(f"⚠️  Sokak anlatımı: {type(e).__name__}: {e}")
+
+
 # ───────────────── JÜRİ PANELİ ─────────────────
 def panel_karesi():
     """Panel için: YOLO kutuları ve sensör bilgisi çizilmiş JPEG."""
@@ -1192,6 +1232,7 @@ def main():
     if setup_raw_terminal():
         threading.Thread(target=keyboard_loop, daemon=True).start()
     threading.Thread(target=panel_besleyici, daemon=True, name="panel-besleyici").start()
+    threading.Thread(target=sokak_anlatimi, daemon=True, name="sokak-anlatimi").start()
 
     time.sleep(2)
     print("\n" + "=" * 60)
