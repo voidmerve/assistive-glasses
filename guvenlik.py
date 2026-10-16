@@ -119,6 +119,7 @@ SES_DOSYALARI = {
     "siklik_cok": "Daha sık anlatacağım",
     "siklik_az": "Daha seyrek anlatacağım",
     "tarama": "Başını yavaşça sağdan sola çevir",
+    "kamera_karanlik": "Kamera görüntüsü çok karanlık, önünü göremiyorum",
     # Kameradan engel uyarısı: "Önünde sandalye var" + "sağdan geç" birleştirilerek çalınır
     "on_engel": "Önünde engel var",
     "on_insan": "Önünde insan var",
@@ -843,6 +844,9 @@ class SesYoneticisi:
                     proc = self._baslat(dosya, ONCELIK_ACIL)
                 if proc is not None:
                     proc.wait()
+                    if proc.returncode != 0 and not getattr(proc, "kesildi", False):
+                        # Örn. kulaklık o an kopuksa: terminalde yazan uyarı kulağa gitmedi
+                        _log(f"⚠️  [SES] uyarı çalınamadı ({os.path.basename(dosya)}, kod {proc.returncode})")
                     self._bitti(proc)
                 with self._kosul:
                     if self._acil_bekleyen is None:

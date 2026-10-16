@@ -81,6 +81,12 @@ GIRIS_W, GIRIS_H = 252, 196  # 14'ün katları (ViT yama boyu)
 ORTALAMA = np.array([0.485, 0.456, 0.406], np.float32)
 SAPMA = np.array([0.229, 0.224, 0.225], np.float32)
 
+# Kare bundan karanlıksa (0-255) mesafe ölçülmez: model simsiyah kareye de bir mesafe uyduruyor
+KARANLIK_ESIGI = _sayi("KARANLIK_ESIGI", 15)
+# Genişliği yaklaşık bilinen sınıflar (m): yakında kutu üstten/alttan kesilince boy yerine kullanılır
+BILINEN_GENISLIK = {"person": 0.50, "chair": 0.50, "car": 1.80, "bus": 2.50, "truck": 2.50,
+                    "refrigerator": 0.75, "toilet": 0.40, "tv": 0.90}
+
 # Boyu yaklaşık bilinen COCO sınıfları (m): ölçek kalibrasyonu için
 BILINEN_BOY = {"person": 1.70, "car": 1.50, "bus": 3.00, "truck": 3.00, "chair": 0.90,
                "bicycle": 1.05, "motorcycle": 1.10, "dog": 0.55, "bench": 0.85,
@@ -123,6 +129,7 @@ class KameraMesafe(threading.Thread):
         self.engel_seviye = 0       # 0 yok, 1 dikkat, 2 dur
         self._son_uyari = 0.0
         self.son_engel = None
+        self.karanlik = False      # son kare karanlık mıydı
         self.durdur_olayi = threading.Event()
         self._kilit = threading.Lock()
 
@@ -189,6 +196,13 @@ class KameraMesafe(threading.Thread):
     def _isle(self, kare):
         t0 = time.time()
         h, w = kare.shape[:2]
+        parlaklik = float(cv2.resize(kare, (64, 48), interpolation=cv2.INTER_AREA).mean())
+        if parlaklik < KARANLIK_ESIGI:
+            if not self.karanlik:
+                print(f"🌑 Kamera görüntüsü çok karanlık (parlaklık {parlaklik:.0f}): mesafe ölçülmüyor")
+            self.karanlik, self.engel_seviye, self.son_engel = True, 0, None
+            return
+        self.karanlik = False
         ham = self.derinlik_haritasi(kare) * DERINLIK_CARPAN  # sabit lens düzeltmesi
         derinlik = ham * self.olcek                            # + boy kalibrasyonunun ince ayarı
         odak = (h / 2) / math.tan(math.radians(KAMERA_DIKEY_FOV / 2))   # piksel
@@ -210,15 +224,25 @@ class KameraMesafe(threading.Thread):
             if parca.size == 0:
                 continue
             d_ham = float(np.median(parca))
-            mesafe = d_ham * self.olcek
-            kaynak = "derinlik"
-            # Boy tahmini: kutu kare kenarına değmiyorsa (nesne kesilmemişse)
+            mesafe, kaynak = d_ham * self.olcek, "derinlik"
+            # Geometrik ölçüm (iğne deliği kamera): nesnenin piksel boyu/genişliği ve gerçek boyutu.
+            # Yakında derinlik modeli bağlamı kaybedip mesafeyi büyütüyor; bu ölçüm orada daha güvenilir.
+            geo, geo_kaynak = None, None
             ayakta = sinif != "person" or (y2 - y1) > 1.8 * (x2 - x1)  # oturan insan 1,70 m değildir
-            if sinif in BILINEN_BOY and ayakta and y1 > 4 and y2 < h - 4 and (y2 - y1) > 20:
-                d_boy = odak * BILINEN_BOY[sinif] / (y2 - y1)
-                if 0.3 < d_boy < 30:
-                    oranlar.append(d_boy / max(d_ham, 0.1))
-                    mesafe, kaynak = (mesafe + d_boy) / 2, "derinlik+boy"
+            dikey_tam = y1 > 4 and y2 < h - 4
+            yatay_tam = x1 > 4 and x2 < w - 4
+            if sinif in BILINEN_BOY and ayakta and dikey_tam and (y2 - y1) > 20:
+                geo, geo_kaynak = odak * BILINEN_BOY[sinif] / (y2 - y1), "boy"
+                if 0.3 < geo < 30:
+                    oranlar.append(geo / max(d_ham, 0.1))  # kalibrasyona sadece boy ölçümü girer
+            elif sinif in BILINEN_GENISLIK and yatay_tam and (x2 - x1) > 20:
+                geo, geo_kaynak = odak * BILINEN_GENISLIK[sinif] / (x2 - x1), "genişlik"
+            if geo is not None and 0.2 < geo < 30:
+                cok_yakin = (x2 - x1) * (y2 - y1) > 0.33 * w * h  # nesne karenin üçte birinden büyük
+                if cok_yakin:
+                    mesafe, kaynak = geo, geo_kaynak
+                else:
+                    mesafe, kaynak = 0.4 * mesafe + 0.6 * geo, f"derinlik+{geo_kaynak}"
             nesneler.append({"ad": ad, "sinif": sinif, "saat": saat_yonu((x1 + x2) / 2 / w, yatay_fov),
                              "mesafe": round(mesafe, 2), "kaynak": kaynak, "guven": round(guven, 2),
                              "kutu": [int(x1), int(y1), int(x2), int(y2)]})
@@ -265,6 +289,12 @@ class KameraMesafe(threading.Thread):
         """
         yol, simdi = olcum["yol"], olcum["zaman"]
         orta = yol["orta"]
+        # Ortadaki nesnenin geometrik mesafesi derinlik tahmininden yakınsa onu esas al
+        # (yakındaki insanı/sandalyeyi derinlik modeli uzakta sanabiliyor)
+        for n in olcum["nesneler"]:
+            x1, _, x2, _ = n["kutu"]
+            if x1 < genislik * 0.67 and x2 > genislik * 0.33 and n["kaynak"] != "derinlik":
+                orta = min(orta, n["mesafe"])
         eski = self.engel_seviye
         # Her eşiğin kendi histerezisi: eşikte titreyen ölçüm uyarıyı açıp kapatmasın
         if orta < ENGEL_DUR_M or (eski == 2 and orta < ENGEL_DUR_M + 0.15):
@@ -308,6 +338,8 @@ class KameraMesafe(threading.Thread):
 
     def ozet_metni(self, en_fazla=4):
         """Live'a ve REST'e verilen mesafe bilgisi."""
+        if self.karanlik:
+            return "Kamera görüntüsü çok karanlık: mesafe ölçülemiyor, mesafe söyleme."
         o = self.guncel()
         if o is None:
             return ""

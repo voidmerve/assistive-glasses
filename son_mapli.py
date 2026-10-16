@@ -77,6 +77,7 @@ import goru
 import guvenlik
 import hafiza
 import kontrol
+import kulaklik
 import mesafe
 import navigasyon
 import panel
@@ -243,6 +244,17 @@ class VoiceRecorder:
             print(f"❌ Mikrofon açılamadı: {e}")
             self.stream = None
             return False
+
+    def yeniden_ac(self):
+        """Kulaklık kopup gelince: eski (ölü) mikrofon akışını kapatıp yenisini aç."""
+        with self.lock:
+            if self.stream is not None:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
+            return self.open()
 
     def start(self):
         with self.lock:
@@ -498,6 +510,7 @@ def durum_ozeti():
         "hafiza": esya_hafizasi.liste(),
         "nav": nav_durum,
         "gozcu": dict(canli_gozcu.sayac) if canli_gozcu is not None else None,
+        "kulaklik": None if kulaklik_bekcisi is None or not kulaklik_bekcisi.etkin else kulaklik_bekcisi.bagli,
     }
 
 
@@ -638,6 +651,21 @@ def engel_uyarisi(e):
     guvenlik_sistemi.titresim.titret(1.0 if e["seviye"] == 2 else 0.6, 0.4 if e["seviye"] == 2 else 0.15)
 
 
+# ───────────────── KULAKLIK ─────────────────
+kulaklik_bekcisi = None  # main() içinde kurulur
+
+
+def kulaklik_degisti(bagli):
+    if bagli:
+        recorder.yeniden_ac()  # mikrofon yeni bağlanan kulaklığa geçsin
+        yayinla("uyari", "Kulaklık yeniden bağlandı")
+        threading.Thread(target=ses_yoneticisi.normal_cal, args=(guvenlik.ses_yolu("ton_hazir"),),
+                         daemon=True).start()
+    else:
+        yayinla("uyari", "Kulaklık bağlantısı koptu, yeniden bağlanılıyor")
+    yayinla("durum", durum_ozeti())
+
+
 # ───────────────── NAVİGASYON ─────────────────
 navigator = None  # main() içinde kurulur
 
@@ -714,6 +742,11 @@ def kare_al(cam, boyut=(480, 360), kalite=60):
 def sensorle_cevapla():
     """İnternet ya da yapay zekâ yokken: sensörün ya da kameranın (cihazda çalışır) ölçtüğünü söyler."""
     m, kaynak = en_yakin_mesafe()
+    if kaynak is None and kamera_mesafe is not None and kamera_mesafe.karanlik:
+        print("🌑 İnternetsiz cevap: kamera karanlık")
+        yayinla("gozluk", "(internetsiz) Kamera görüntüsü çok karanlık")
+        oynat(guvenlik.ses_yolu("kamera_karanlik"))
+        return
     if m is None:
         ad = "engel_yok"
     elif m < 0.75:
@@ -1136,7 +1169,7 @@ def keyboard_loop():
 
 # ───────────────── MAIN ─────────────────
 def main():
-    global cam, juri_paneli, navigator, nesne_tanima, kamera_mesafe
+    global cam, juri_paneli, navigator, nesne_tanima, kamera_mesafe, kulaklik_bekcisi
     print("SYSTEM STARTING...")
     cam = Camera().start()
     navigator = navigasyon.Navigasyon(
@@ -1151,6 +1184,8 @@ def main():
         nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
     kamera_mesafe = mesafe.KameraMesafe(kare_al=cam.get, mod_al=mod, yolo=nesne_tanima, uyari=engel_uyarisi)
     kamera_mesafe.start()
+    kulaklik_bekcisi = kulaklik.KulaklikBekcisi(degisti=kulaklik_degisti)
+    kulaklik_bekcisi.start()
     canli_kur()
     recorder.open()  # mikrofon sürekli açık: kısa komutların başı kesilmesin
     dugme.baslat()

@@ -256,7 +256,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td{padding:3px 0;border
 <span class="rozet">İnternet: <b id="net">—</b></span>
 <span class="rozet">Sensör: <b id="sensor">—</b></span>
 <span class="rozet">Konuşma: <b id="duzey">—</b></span>
-<span class="rozet">Gözcü: <b id="gozcu">—</b></span></header>
+<span class="rozet">Gözcü: <b id="gozcu">—</b></span>
+<span class="rozet">Kulaklık: <b id="kulaklik">—</b></span></header>
 <main>
 <div class="sutun">
  <div class="kart"><h2>Gözlüğün gördüğü (YOLO, cihaz üstünde)</h2><img id="video" src="/video" alt="kamera">
@@ -307,6 +308,7 @@ function isle(m){const v=m.veri;switch(m.tur){
  case"durum":rozet("mod",v.mod==="home"?"Ev":"Sokak");rozet("ai",v.ai,v.ai&&v.ai.startsWith("Live"));
   rozet("net",v.internet?"var":"yok",v.internet);rozet("duzey",v.duzey+(v.mod!=="home"?` · anlatıcı ${v.siklik}`:""));
   if(v.hafiza){hafiza=v.hafiza;esyaCiz()}if(v.nav)navCiz(v.nav);
+  if(v.kulaklik!==undefined&&v.kulaklik!==null)rozet("kulaklik",v.kulaklik?"bağlı":"KOPUK",v.kulaklik);
   if(v.gozcu)rozet("gozcu",`${v.gozcu.gozcu} kare · ${v.gozcu.bildir} bildirim · ${v.gozcu.esya_kaydet} eşya`);break;
  case"sensor":$("mesafe").textContent=v.mesafe==null?"> 2 m":v.mesafe.toFixed(2)+" m";
   $("seviye").textContent=["","YAKLAŞIYOR","DUR"][v.seviye];$("seviye").style.color=["","#f5d90a","#e5484d"][v.seviye];

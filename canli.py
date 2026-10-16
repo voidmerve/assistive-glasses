@@ -104,9 +104,12 @@ KONUŞMA BİÇİMİ:
 OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Tamam" de):
 - "SOKAK GÖZCÜSÜ": Karede güvenlik ya da yön bulma için önemli bir şey varsa bildir fonksiyonunu çağır.
   tur="olay": aşağı inen basamak, merdiven, yaya geçidi, trafik ışığının rengi, durağa gelen otobüsün
-  numarası, çukur, açık kapak, yola park etmiş araç. tur="yer": eczane, market, fırın, durak, banka,
-  okunabilen tabela ya da dükkân adı. Metin tek kısa cümle, saat yönüyle, mesafe biliniyorsa onunla.
-  Önemli bir şey yoksa fonksiyon çağırma. Önceki gözcü mesajlarında bildirdiğini tekrar bildirme.
+  numarası, çukur, açık kapak. tur="engel": yürüme yolunda ya da yakınında duran engeller: park etmiş
+  bisiklet ya da motosiklet, kaldırıma park etmiş araç, yoldaki insan grubu, direk, çöp kutusu, tabela
+  ayağı, sandalye, masa. tur="yer": eczane, market, fırın, durak, banka, okunabilen tabela ya da dükkân
+  adı. Metin tek kısa cümle, saat yönüyle, mesafe biliniyorsa "yaklaşık" diyerek. Örnek: "Saat 1
+  yönünde, yaklaşık iki metrede park etmiş bisiklet." Önemli bir şey yoksa fonksiyon çağırma.
+  Önceki gözcü mesajlarında bildirdiğini tekrar bildirme.
 - "EV GÖZCÜSÜ": Kareye dikkatle bak; küçük eşyaları da ara. Anahtar: tek anahtar, anahtar demeti,
   anahtarlık, kapı kartı. Cüzdan: deri ya da kumaş cüzdan, kartlık, para çantası. Ayrıca telefon ve
   bilgisayar (dizüstü, tablet değil). Gördüğün her biri için esya_kaydet çağır.
@@ -145,8 +148,8 @@ def _arac_tanimlari(types):
           {"esya": esya, "konum": S(type="STRING", description="Odadaki sabit bir şeye göre, ör. 'koltuğun "
                                      "üzerinde, sağ kolçağın yanında'. Saat yönü ya da 'önünde' YOK.")}),
         f("esya_nerede", "Eşyanın en son nerede ve ne zaman görüldüğünü döner.", {"esya": esya}),
-        f("bildir", "Sokak gözcüsü: önemli bir olay ya da yön bulmaya yarayan bir yer bildirir.",
-          {"tur": S(type="STRING", enum=["olay", "yer"]),
+        f("bildir", "Sokak gözcüsü: önemli bir olay, yoldaki bir engel ya da yön bulmaya yarayan bir yer bildirir.",
+          {"tur": S(type="STRING", enum=["olay", "engel", "yer"]),
            "metin": S(type="STRING", description="Tek kısa Türkçe cümle, saat yönüyle")}),
         f("cevreyi_tara", "Kullanıcı başını sağdan sola çevirirken birkaç kare toplar ve çevreyi anlattırır."),
         f("navigasyon_baslat", "Yürüyüş rotası hesaplar, söylenecek özeti döner.",
