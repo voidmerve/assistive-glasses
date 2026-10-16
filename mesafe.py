@@ -118,7 +118,7 @@ MESAFE_SAYILI = (os.getenv("MESAFE_SAYILI") or "0").strip() == "1"
 def yakinlik_yazisi(m):
     if m < 1.0:
         return "çok yakında"
-    if m < 2.5:
+    if m < 4.5:
         return "yakında"
     return "uzakta"
 
