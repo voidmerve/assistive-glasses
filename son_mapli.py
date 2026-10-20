@@ -179,7 +179,11 @@ class Camera:
 
     def get(self):
         with self.lock:
-            return None if self.frame is None else self.frame.copy()
+            f = self.frame
+        if f is None:
+            return None
+        donmus = mesafe.kare_dondur(f)  # kamera yan takılı: düz kare (döndürme zaten kopya üretir)
+        return f.copy() if donmus is f else donmus
 
 
 # ───────────────── VOICE RECORDER ─────────────────
@@ -735,6 +739,8 @@ def kare_al(cam, boyut=(480, 360), kalite=60):
     frame = cam.get()
     if frame is None:
         return None, None
+    if frame.shape[0] > frame.shape[1]:
+        boyut = (boyut[1], boyut[0])  # dikey kare: en-boy oranı bozulmasın
     small = cv2.resize(frame, boyut)
     _, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, kalite])
     return frame, base64.b64encode(buf).decode("utf-8")
@@ -1064,8 +1070,8 @@ def panel_karesi():
     kare = cam.get()
     if kare is None:
         return None
-    olcek = 640 / kare.shape[1]  # kutular kamera çözünürlüğünde, panel karesi 640 × 480
-    kare = cv2.resize(kare, (640, 480))
+    olcek = 640 / max(kare.shape[:2])  # kutular kamera çözünürlüğünde, panel karesi uzun kenarı 640
+    kare = cv2.resize(kare, (round(kare.shape[1] * olcek), round(kare.shape[0] * olcek)))
     if nesne_tanima is not None:
         kare = nesne_tanima.ciz(kare, olcek)
     o = kamera_mesafe.guncel() if kamera_mesafe else None

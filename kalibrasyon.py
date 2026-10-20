@@ -62,17 +62,18 @@ def kisi_tahmini(olcer, yolo, kare):
     if not insanlar:
         return None
     harita, (kx0, ky0, kx1, ky1) = olcer.ham_derinlik(kare)
-    sx, sy = mesafe.GIRIS_W / (kx1 - kx0), mesafe.GIRIS_H / (ky1 - ky0)
+    GH, GW = harita.shape
+    sx, sy = GW / (kx1 - kx0), GH / (ky1 - ky0)
     x1, y1, x2, y2 = min(insanlar, key=lambda t: abs((t[3][0] + t[3][2]) / 2 - w / 2))[3]
     a1 = int((x1 - kx0 + (x2 - x1) * 0.30) * sx)
     a2 = int((x1 - kx0 + (x2 - x1) * 0.70) * sx)
     b1 = int((y1 - ky0 + (y2 - y1) * 0.25) * sy)
     b2 = int((y1 - ky0 + (y2 - y1) * 0.75) * sy)
-    a1, a2 = max(0, min(mesafe.GIRIS_W - 1, a1)), min(mesafe.GIRIS_W, max(a1 + 1, a2))
-    b1, b2 = max(0, min(mesafe.GIRIS_H - 1, b1)), min(mesafe.GIRIS_H, max(b1 + 1, b2))
+    a1, a2 = max(0, min(GW - 1, a1)), min(GW, max(a1 + 1, a2))
+    b1, b2 = max(0, min(GH - 1, b1)), min(GH, max(b1 + 1, b2))
     model_d = float(np.median(harita[b1:b2, a1:a2]))
     # Programdaki geometrik ölçümün aynısı (yakında program buna güvenir)
-    odak = (h / 2) / math.tan(math.radians(mesafe.KAMERA_DIKEY_FOV / 2))
+    odak = (min(w, h) / 2) / math.tan(math.radians(mesafe.KAMERA_DIKEY_FOV / 2))
     geo = None
     if (y2 - y1) > 1.8 * (x2 - x1) and y1 > 4 and y2 < h - 4:
         geo = odak * mesafe.BILINEN_BOY["person"] / (y2 - y1)
@@ -88,7 +89,8 @@ def kare_kaydet(kare, kutu, hedef):
         cv2.rectangle(k, kutu[:2], kutu[2:], (0, 255, 0), 3)
     x0, y0, x1, y1 = mesafe.KameraMesafe.kirpma_kutusu(k.shape[1], k.shape[0])
     cv2.rectangle(k, (x0, y0), (x1, y1), (255, 0, 0), 2)  # derinlik modelinin gördüğü bölge
-    cv2.imwrite(os.path.join(KARE_KLASORU, f"{hedef:g}m.jpg"), cv2.resize(k, (640, 480)))
+    o = 640 / max(k.shape[:2])
+    cv2.imwrite(os.path.join(KARE_KLASORU, f"{hedef:g}m.jpg"), cv2.resize(k, (round(k.shape[1] * o), round(k.shape[0] * o))))
 
 
 def tekdüze_aralik(olcumler):
@@ -163,7 +165,7 @@ def main():
             for _ in range(a.kare * 3):
                 if len(modeller) >= a.kare:
                     break
-                kare = kamera.capture_array()
+                kare = mesafe.kare_dondur(kamera.capture_array())
                 son_kare = kare
                 if float(kare.mean()) < mesafe.KARANLIK_ESIGI:
                     continue

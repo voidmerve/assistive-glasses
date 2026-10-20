@@ -64,7 +64,7 @@ GORU_CEKIRDEK = int(_sayi("GORU_CEKIRDEK", 3))
 ENGEL_UYARI_M = _sayi("ENGEL_UYARI_M", 1.5)           # yürüme yolunda bundan yakın: "Önünde sandalye var"
 ENGEL_DUR_M = _sayi("ENGEL_DUR_M", 0.7)               # bundan yakın: bip + "Dur"
 ENGEL_TEKRAR_S = _sayi("ENGEL_TEKRAR_S", 8.0)         # engel durdukça hatırlatma aralığı
-KAMERA_DIKEY_FOV = _sayi("KAMERA_DIKEY_FOV", 67.0)
+KAMERA_DIKEY_FOV = _sayi("KAMERA_DIKEY_FOV", 67.0)  # karenin kısa kenarının görüş açısı
 KAMERA_UYARI = (os.getenv("KAMERA_UYARI") or "1").strip() not in ("0", "hayir", "false")
 # mod: ev → iç mekân, sokak → dış mekân modeli. ic / dis: her zaman o model
 # (sunum salonda yapılacaksa sokak modunda da doğru mesafe için DERINLIK_MODELI=ic)
@@ -77,7 +77,24 @@ MODELLER = {
     "ev": "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
     "sokak": "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
 }
-GIRIS_W, GIRIS_H = 252, 196  # 14'ün katları (ViT yama boyu)
+GIRIS_W, GIRIS_H = 252, 196  # 14'ün katları (ViT yama boyu); dikey karede yer değiştirir
+
+# Kamera gözlüğe yan takılı: kare 90° yatık geliyor. Her şey (YOLO, derinlik, Gemini, panel)
+# düz kare görsün diye kameradan alınır alınmaz döndürülür. sol = saat yönünün tersine 90°,
+# sag = saat yönünde 90°, ters = 180°, yok = döndürme.
+KAMERA_DONDUR = (os.getenv("KAMERA_DONDUR") or "sol").strip().lower()
+_DONDURME = {"sol": cv2.ROTATE_90_COUNTERCLOCKWISE, "sag": cv2.ROTATE_90_CLOCKWISE, "ters": cv2.ROTATE_180}
+
+
+def kare_dondur(kare):
+    if kare is None or KAMERA_DONDUR not in _DONDURME:
+        return kare
+    return cv2.rotate(kare, _DONDURME[KAMERA_DONDUR])
+
+
+def giris_boyutu(w, h):
+    """Derinlik modeline verilecek (genişlik, yükseklik): karenin yönüne göre."""
+    return (GIRIS_H, GIRIS_W) if h > w else (GIRIS_W, GIRIS_H)
 ORTALAMA = np.array([0.485, 0.456, 0.406], np.float32)
 SAPMA = np.array([0.229, 0.224, 0.225], np.float32)
 
@@ -242,15 +259,16 @@ class KameraMesafe(threading.Thread):
         return self.derinlik_haritasi(kare_bgr[y0:y1, x0:x1]), (x0, y0, x1, y1)
 
     def derinlik_haritasi(self, kare_bgr):
-        """BGR kare → metre cinsinden derinlik (GIRIS_H × GIRIS_W)."""
-        rgb = cv2.cvtColor(cv2.resize(kare_bgr, (GIRIS_W, GIRIS_H), interpolation=cv2.INTER_AREA),
+        """BGR kare → metre cinsinden derinlik (yatay karede GIRIS_H × GIRIS_W, dikeyde tersi)."""
+        gw, gh = giris_boyutu(kare_bgr.shape[1], kare_bgr.shape[0])
+        rgb = cv2.cvtColor(cv2.resize(kare_bgr, (gw, gh), interpolation=cv2.INTER_AREA),
                            cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         x = ((rgb - ORTALAMA) / SAPMA).transpose(2, 0, 1)[None]
         with self.torch.inference_mode():
             d = self.model(pixel_values=self.torch.from_numpy(x)).predicted_depth
         d = d.squeeze().numpy()
-        if d.shape != (GIRIS_H, GIRIS_W):
-            d = cv2.resize(d, (GIRIS_W, GIRIS_H))
+        if d.shape != (gh, gw):
+            d = cv2.resize(d, (gw, gh))
         return d
 
     def _isle(self, kare):
@@ -270,7 +288,8 @@ class KameraMesafe(threading.Thread):
         else:
             ham = model * DERINLIK_CARPAN        # sabit lens düzeltmesi
         derinlik = ham * self.olcek              # + boy kalibrasyonunun ince ayarı
-        odak = (h / 2) / math.tan(math.radians(KAMERA_DIKEY_FOV / 2))   # piksel
+        odak = (min(w, h) / 2) / math.tan(math.radians(KAMERA_DIKEY_FOV / 2))   # piksel
+        GIRIS_H, GIRIS_W = model.shape  # bu karenin derinlik haritası boyutu (döndürülmüşse dikey)
         yatay_fov = math.degrees(2 * math.atan((w / 2) / odak))
 
         # Bölgeler: orta yükseklik bandında en yakın %15'lik dilim (tek piksel gürültüsüne dayanıklı)
@@ -435,7 +454,8 @@ class KameraMesafe(threading.Thread):
             h = self.son_harita
         if h is None:
             return None
-        _, buf = cv2.imencode(".jpg", cv2.resize(h, (320, 248)), [cv2.IMWRITE_JPEG_QUALITY, 70])
+        boyut = (248, 320) if h.shape[0] > h.shape[1] else (320, 248)
+        _, buf = cv2.imencode(".jpg", cv2.resize(h, boyut), [cv2.IMWRITE_JPEG_QUALITY, 70])
         return buf.tobytes()
 
     def durdur(self):
