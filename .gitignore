@@ -10,8 +10,6 @@
 !test_carpisma.py
 !kontrol.py
 !canli.py
-!tasarim/
-!tasarim/**
 tasarim/__pycache__/
 !hafiza.py
 !goru.py
