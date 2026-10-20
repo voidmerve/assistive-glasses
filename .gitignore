@@ -23,3 +23,7 @@ tasarim/__pycache__/
 !servis/**
 !kulaklik.py
 !kalibrasyon.py
+!ev_hafizasi.py
+!gecmis.py
+!yuz.py
+!yurume.py

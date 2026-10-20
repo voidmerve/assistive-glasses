@@ -62,6 +62,7 @@ BAGLAM_SINIRI = int(_sayi("CANLI_BAGLAM_TOKEN", 12000))  # bunu aşınca eski me
 ESYA_ARALIGI_S = _sayi("ESYA_ARALIGI_S", 8)
 SAHNE_DEGISIM_ESIGI = 10.0   # küçük gri kareler arası ortalama fark (0-255)
 SAHNE_EN_UZUN_S = 60.0       # sahne değişmese de bu kadar sürede bir bak
+HIZLI_GOZCU_S = 3.0          # nöbet varken ya da yakında biri varken gözcü bu sıklıkta bakar
 
 GIRIS_ORNEKLEME = 16000
 CIKIS_ORNEKLEME = 24000
@@ -101,6 +102,18 @@ KONUŞMA BİÇİMİ:
 - Bir yere gitmek isterse navigasyon_baslat, navigasyonu bitirmek isterse navigasyon_durdur,
   nerede olduğunu sorarsa neredeyim çağır ve dönen cümleyi söyle.
 - Cihazın durumunu sorarsa durum_bildir çağır.
+- "Çıkıyorum", "evden çıkıyorum", "dışarı çıkacağım" derse cikis_kontrolu çağır. En fazla 3 kısa cümle:
+  önce dikkat gereken cihazlar ("dikkat": true, ör. ocak en son açıktı), sonra yanında olmayabilecek
+  eşyalar (anahtar, cüzdan, telefon) ve en son yerleri. Bilgi eskiyse "en son ... önce" de.
+- "Evde ne değişti", "bir şey değişmiş mi" derse ev_degisiklikleri çağır ve kısaca söyle.
+- "... olunca / gelince / yanınca haber ver" derse nobet_kur çağır, sonra kısa onay ver ("Tamam, 34
+  gelince söyleyeceğim."). "Beklemeyi bırak", "haber vermene gerek yok" derse nobet_iptal çağır.
+- "Buraya not al", "buraya not bırak: ..." derse yer_notu_ekle çağır. "Buradaki notu sil" / "son notu
+  sil" / "bütün notları sil" derse yer_notu_sil çağır. Dönen cümleyi söyle.
+- "Az önce ne gördük", "geçtiğimiz eczane neredeydi", "bugün nereleri gördük" gibi sorularda
+  gecmis_sorgula çağır; cevabı ne zaman ve ne kadar geride olduğuyla söyle. Listede yoksa uydurma.
+- "Bu Ayşe", "bunu Ayşe olarak tanı" derse yuz_tanit çağır (kişinin izni olduğu varsayılır), dönen
+  cümleyi söyle. "Karşımda kim var", "kim geldi" derse kim_var çağır. "Ayşe'yi unut" derse yuz_unut.
 
 OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Tamam" de):
 - "SOKAK GÖZCÜSÜ": Karede güvenlik ya da yön bulma için önemli bir şey varsa bildir fonksiyonunu çağır.
@@ -111,6 +124,12 @@ OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Ta
   adı. Metin tek kısa cümle, saat yönüyle, mesajda mesafe bilgisi varsa onunla. Örnek: "Saat 1
   yönünde, park etmiş bisiklet." Önemli bir şey yoksa fonksiyon çağırma.
   Önceki gözcü mesajlarında bildirdiğini tekrar bildirme.
+- SOSYAL İPUÇLARI (iki gözcüde de): Biri kullanıcıya elini uzatıyorsa (tokalaşma), el sallıyorsa,
+  kullanıcıya doğru gelip konuşmak istiyor gibiyse ya da konuşulan kişi uzaklaşıp gittiyse
+  bildir(tur="sosyal") çağır. Tek kısa cümle: "Saat 12 yönündeki kişi elini uzattı." Sadece açıkça
+  görüyorsan; yoldan geçenleri bildirme.
+- Mesajda "NÖBET:" varsa: kullanıcı orada yazan şeyi bekliyor. Karede bu AÇIKÇA gerçekleştiyse
+  nobet_tetiklendi çağır (metin: ne oldu, saat yönüyle). Emin değilsen çağırma. Bu diğer görevlerine ektir.
 - "EV GÖZCÜSÜ": Kareye dikkatle bak; küçük eşyaları da ara. Anahtar: tek anahtar, anahtar demeti,
   anahtarlık, kapı kartı. Cüzdan: deri ya da kumaş cüzdan, kartlık, para çantası. Ayrıca telefon ve
   bilgisayar (dizüstü, tablet değil). Gördüğün her biri için esya_kaydet çağır.
@@ -118,6 +137,11 @@ OTOMATİK MESAJLAR (kullanıcı sormadı, sesin kullanıcıya gitmez; sadece "Ta
   soracak: "koltuğun üzerinde, sağ kolçağın yanında", "yemek masasında, meyve kasesinin yanında",
   "kapının yanındaki dolabın üstünde". ASLA saat yönü, "önünde", "solunda", "karşında" gibi bakış
   yönüne bağlı ifadeler kullanma. Emin değilsen ya da görmüyorsan fonksiyon çağırma.
+  Ayrıca HER ev gözcüsü mesajında bolge_gozlemi çağır: bölge (salon, mutfak, koridor, yatak odası,
+  banyo, antre...), kalıcı mobilya ve yerdeki şeyler (her seferinde AYNI sade adlarla: "sandalye",
+  "sehpa", "ayakkabılık"; renk ve sayı ekleme), yürüme yolunda ya da yerdeyse yolda=true; görünen
+  cihazların durumu (ocakta alev ya da açık düğme = açık, akan musluk = açık, açık pencere ya da
+  kapı). Kare bulanık ya da bölge belirsizse çağırma.
 - "OTOMATİK TARİF" (sokak modunda 30 sn'de bir, kullanıcı sormadı): Önündeki en önemli şeyi tek kısa
   cümleyle söyle, saat yönü ve mesajdaki mesafe bilgisiyle. Örnek: "Saat 12 yönünde bank
   var." Önünde dikkat çeken bir şey yoksa sadece "Önün açık." de. Bir önceki otomatik tarifle aynı şeyi
@@ -138,8 +162,9 @@ def _arac_tanimlari(types):
     def f(ad, aciklama, ozellikler=None, gerekli=None):
         return types.FunctionDeclaration(
             name=ad, description=aciklama,
-            parameters=bos if not ozellikler else S(type="OBJECT", properties=ozellikler,
-                                                     required=gerekli or list(ozellikler)))
+            parameters=bos if not ozellikler else S(
+                type="OBJECT", properties=ozellikler,
+                required=list(ozellikler) if gerekli is None else gerekli))
 
     esya = S(type="STRING", enum=["anahtar", "cüzdan", "telefon", "bilgisayar"])
     return [types.Tool(function_declarations=[
@@ -157,9 +182,51 @@ def _arac_tanimlari(types):
           {"esya": esya, "konum": S(type="STRING", description="Odadaki sabit bir şeye göre, ör. 'koltuğun "
                                      "üzerinde, sağ kolçağın yanında'. Saat yönü ya da 'önünde' YOK.")}),
         f("esya_nerede", "Eşyanın en son nerede ve ne zaman görüldüğünü döner.", {"esya": esya}),
-        f("bildir", "Sokak gözcüsü: önemli bir olay, yoldaki bir engel ya da yön bulmaya yarayan bir yer bildirir.",
-          {"tur": S(type="STRING", enum=["olay", "engel", "yer"]),
+        f("bildir", "Gözcü: önemli bir olay, yoldaki bir engel, yön bulmaya yarayan bir yer ya da sosyal bir "
+                    "ipucu (biri el uzatıyor, el sallıyor) bildirir.",
+          {"tur": S(type="STRING", enum=["olay", "engel", "yer", "sosyal"]),
            "metin": S(type="STRING", description="Tek kısa Türkçe cümle, saat yönüyle")}),
+        f("bolge_gozlemi", "Ev gözcüsü: karedeki bölgeyi, gördüğün mobilya ve eşyaları ve cihaz durumlarını "
+                           "metin olarak bildirir (değişim fark etme ve çıkış kontrolü için).",
+          {"bolge": S(type="STRING", description="Odanın ya da yerin kısa adı: salon, mutfak, koridor, "
+                                                  "yatak odası, banyo, antre, çalışma odası, balkon"),
+           "nesneler": S(type="ARRAY", description="Kalıcı ve yerdeki şeyler, en fazla 12, sade tekil adlar "
+                                                    "(sandalye, sehpa, ayakkabılık, çanta, kutu)",
+                         items=S(type="OBJECT", properties={
+                             "ad": S(type="STRING"),
+                             "yolda": S(type="BOOLEAN", description="Yürüme yolunda ya da yerde, takılınabilir")},
+                             required=["ad", "yolda"])),
+           "durumlar": S(type="ARRAY", description="Görünen cihazların durumu; görünmüyorsa boş liste",
+                         items=S(type="OBJECT", properties={
+                             "cihaz": S(type="STRING", enum=["ocak", "fırın", "musluk", "pencere", "kapı",
+                                                             "ışık", "ütü", "klima", "televizyon"]),
+                             "durum": S(type="STRING", enum=["açık", "kapalı"])},
+                             required=["cihaz", "durum"]))}),
+        f("ev_degisiklikleri", "Evde neyin her zamankinden farklı olduğunu döner.",
+          {"bolge": S(type="STRING", description="İsteğe bağlı: sadece bu bölge")}, gerekli=[]),
+        f("cikis_kontrolu", "Kullanıcı evden çıkarken: eşyaların son yerleri ve ocak, musluk, pencere gibi "
+                            "cihazların en son görülen durumu."),
+        f("nobet_kur", "Kullanıcının beklediği bir şey olunca haber vermek için gözcüyü görevlendirir "
+                       "(\"34 gelince söyle\", \"annem gelince haber ver\", \"su kaynayınca söyle\").",
+          {"kosul": S(type="STRING", description="Beklenen şeyin net tarifi, ör. '34 numaralı otobüs durağa geldi'"),
+           "sure_dk": S(type="NUMBER", description="En fazla kaç dakika beklensin (varsayılan 30)")},
+          gerekli=["kosul"]),
+        f("nobet_iptal", "Etkin bekleme görevini iptal eder."),
+        f("nobet_tetiklendi", "Gözcü: NÖBET koşulu karede gerçekleşti.",
+          {"metin": S(type="STRING", description="Kullanıcıya söylenecek tek kısa cümle, ör. '34 numaralı otobüs geldi, saat 1 yönünde.'")}),
+        f("yer_notu_ekle", "Bulunulan yere (telefon GPS'i) sesli not bırakır; oraya yaklaşınca okunur.",
+          {"metin": S(type="STRING", description="Notun kendisi, ör. 'durağın önünde üç basamak var'")}),
+        f("yer_notu_sil", "Yer notunu siler.",
+          {"hangisi": S(type="STRING", enum=["buradaki", "son", "hepsi"])}),
+        f("gecmis_sorgula", "Son dakikalarda söylenen ve gözcünün gördüğü her şeyi (söylenmeyenler dahil) "
+                            "zamanı ve şu anki konuma uzaklığıyla döner. 'Az önce ne gördük', 'geçtiğimiz eczane "
+                            "neredeydi' gibi sorular için.",
+          {"dakika": S(type="NUMBER", description="Kaç dakika geriye bakılsın (varsayılan 30)")}, gerekli=[]),
+        f("yuz_tanit", "Karşıdaki kişinin yüzünü isimle kaydeder (sadece kişi izin verdiyse). Kişi yaklaşık bir "
+                       "metrede, yüzü kameraya dönük durmalı; fonksiyon birkaç saniye sürer.",
+          {"isim": S(type="STRING")}),
+        f("yuz_unut", "Tanıtılmış bir kişinin yüz kaydını siler.", {"isim": S(type="STRING")}),
+        f("kim_var", "Karşıda yüzü görünen tanıdık kişileri ve saat yönlerini döner. Tanıtılmış kişileri de listeler."),
         f("cevreyi_tara", "Kullanıcı başını sağdan sola çevirirken birkaç kare toplar ve çevreyi anlattırır."),
         f("navigasyon_baslat", "Yürüyüş rotası hesaplar, söylenecek özeti döner.",
           {"hedef": S(type="STRING", description="Gidilmek istenen yerin adı")}),
@@ -182,7 +249,7 @@ class CanliAsistan:
     def __init__(self, api_key, ses, araclar, kare_al, duzey_al, mod_al, son_ses_ayarla,
                  yayinla=None, olcum=None, mesafe_bilgisi=None, gozcu=True, ad="kullanıcı",
                  mesgul_al=None, model=CANLI_MODEL,
-                 olay_araligi=OLAY_ARALIGI_S, esya_araligi=ESYA_ARALIGI_S):
+                 olay_araligi=OLAY_ARALIGI_S, esya_araligi=ESYA_ARALIGI_S, hizli_al=None):
         self.api_key = api_key
         self.ses = ses
         self.araclar = araclar
@@ -200,6 +267,9 @@ class CanliAsistan:
         self.gozcu_acik = gozcu
         self.ad = ad
         self.mesgul_al = mesgul_al or (lambda: False)  # diğer oturum konuşurken gözcü beklesin
+        # f() → True: yakında biri var (el uzatma gibi sosyal ipuçları kaçmasın), gözcü sık baksın
+        self.hizli_al = hizli_al or (lambda: False)
+        self._nobet = None  # {"kosul", "bitis"}: kullanıcının beklediği olay (gözcü oturumunda)
         self.model = model
         self.olay_araligi = olay_araligi
         self.esya_araligi = esya_araligi
@@ -278,6 +348,23 @@ class CanliAsistan:
 
     def yonlendir(self, metin):
         return self._gonder("yonlendir", metin)
+
+    # ---------- nöbet: "34 gelince söyle" (gözcü oturumunda) ----------
+    def nobet_kur(self, kosul, sure_s=1800):
+        self._nobet = {"kosul": kosul.strip(), "bitis": time.monotonic() + sure_s}
+
+    def nobet_iptal(self):
+        eski, self._nobet = self._nobet, None
+        return eski
+
+    @property
+    def nobet(self):
+        """Etkin nöbet ya da None. Süresi dolanı da döner ("suresi_doldu": True) ve kapatır."""
+        n = self._nobet
+        if n is not None and time.monotonic() > n["bitis"]:
+            self._nobet = None
+            return {**n, "suresi_doldu": True}
+        return n
 
     def konusmayi_kes(self):
         """O an çalan cevabı ve henüz gelmemiş cevapları susturur. Bir şey susturulduysa True."""
@@ -451,7 +538,11 @@ class CanliAsistan:
     async def _gozcu(self):
         while True:
             mod = self.mod_al()
+            nobet = self._nobet
+            hizli = nobet is not None or self.hizli_al()
             aralik = self.olay_araligi if mod == "sokak" else self.esya_araligi
+            if hizli:
+                aralik = HIZLI_GOZCU_S if aralik <= 0 else min(aralik, HIZLI_GOZCU_S)
             await asyncio.sleep(aralik if aralik > 0 else 5)
             if aralik <= 0:
                 continue
@@ -460,17 +551,20 @@ class CanliAsistan:
                       or self.ses.normal_caliyor or self.ses.acil_caliyor or self.mesgul_al())
             if mesgul or time.monotonic() - self._son_etkilesim < aralik:
                 continue
-            if mod == "sokak" and self.duzey_al() == "sessiz":
-                continue  # "sessiz ol": sokakta kendiliğinden bildirim yok
+            if mod == "sokak" and self.duzey_al() == "sessiz" and nobet is None:
+                continue  # "sessiz ol": sokakta kendiliğinden bildirim yok (istenen nöbet hariç)
             jpeg = self.kare_al()
             if jpeg is None:
                 continue
             if mod == "ev":
-                if not self._sahne_degisti(jpeg):
+                # Sahne değişmediyse bakma; ama nöbet varken ya da yakında biri varken her zaman bak
+                if not self._sahne_degisti(jpeg) and not hizli:
                     continue
                 metin = "EV GÖZCÜSÜ"
             else:
                 metin = "SOKAK GÖZCÜSÜ"
+            if nobet is not None:
+                metin += f". NÖBET: {nobet['kosul']}"
             self._son_gozcu = time.monotonic()
             self._kuyruk.put_nowait(("gozcu", metin, jpeg))
 

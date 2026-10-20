@@ -73,7 +73,15 @@ from queue import Queue
 from collections import deque
 from picamera2 import Picamera2
 from dotenv import load_dotenv
+
+# ───────────────── CONFIG ─────────────────
+# API key'ler ve ayarlar bu dosyayla aynı klasördeki .env dosyasından okunur.
+# Modüller ayarlarını yüklenirken okuduğu için .env onlardan ÖNCE yüklenmeli.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 import anlatici
+import ev_hafizasi
+import gecmis
 import goru
 import guvenlik
 import hafiza
@@ -83,10 +91,8 @@ import mesafe
 import navigasyon
 import panel
 import sesli_komut
-
-# ───────────────── CONFIG ─────────────────
-# API key'ler bu dosyayla aynı klasördeki .env dosyasından okunur.
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+import yurume
+import yuz
 API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
@@ -409,8 +415,25 @@ juri_paneli = None  # main() içinde kurulur
 
 
 def yayinla(tur, veri):
+    if tur == "gozluk" and isinstance(veri, str):
+        gecmis_kaydi.ekle("söylendi", veri, simdiki_konum())
     if juri_paneli is not None:
         juri_paneli.yayinla(tur, veri)
+
+
+# ───────────────── HAFIZALAR ─────────────────
+gecmis_kaydi = gecmis.Gecmis()               # sadece bellekte, 2 saat
+yer_notlari = gecmis.YerNotlari()            # yer_notlari.json
+ev_hafiza = ev_hafizasi.EvHafizasi()         # ev_hafizasi.json
+yurume_kal = yurume.YurumeKalibrasyonu()     # yurume.json
+yuz_tanima = None                            # main() içinde kurulur
+
+
+def simdiki_konum():
+    """Telefon GPS'i taze ise (enlem, boylam), değilse None."""
+    if navigator is not None and navigator.gps_var:
+        return tuple(navigator.konum)
+    return None
 
 
 def olcum(ad, deger, birim="s"):
@@ -914,7 +937,10 @@ def arac_durum_bildir():
             "mesafe_sensoru": "çalışmıyor" if guvenlik_sistemi.sensor_thread.arizali else "çalışıyor",
             "mod": mod(), "konusma_duzeyi": ayarlar.get("konusma_duzeyi"),
             "navigasyon": "etkin" if navigator and navigator.aktif else "yok",
-            "telefon_gps": "geliyor" if navigator and navigator.gps_var else "yok"}
+            "telefon_gps": "geliyor" if navigator and navigator.gps_var else "yok",
+            "nobet": (canli_gozcu.nobet or {}).get("kosul", "yok") if canli_gozcu else "yok",
+            "tanitilan_kisi": len(yuz_tanima.liste()) if yuz_tanima else 0,
+            "yer_notu": len(yer_notlari.notlar), "yurume_kalibrasyonu": yurume_kal.durum()}
 
 
 def arac_esya_kaydet(esya, konum):
@@ -927,8 +953,12 @@ def arac_esya_nerede(esya):
 
 
 def arac_bildir(tur, metin):
-    """Sokak gözcüsünün bildirimi: orta yol kurallarına göre söylenir ya da susulur."""
-    if mod() != MOD_SOKAK:
+    """Gözcünün bildirimi: orta yol kurallarına göre söylenir ya da susulur. Hepsi geçmişe yazılır."""
+    gecmis_kaydi.ekle(f"gözcü/{tur}", metin, simdiki_konum())
+    if tur == "sosyal":
+        if ayarlar.get("konusma_duzeyi") == DUZEY_SESSIZ:
+            return {"sonuc": "sessiz modda, söylenmedi"}
+    elif mod() != MOD_SOKAK:
         return {"sonuc": "ev modunda bildirim yok"}
     soylenecek = anlatim.karar(tur, metin)
     yayinla("olay", f"{'🔊' if soylenecek else '🔇'} [{tur}] {metin}")
@@ -974,6 +1004,141 @@ def arac_neredeyim():
     return {"sonuc": navigator.neredeyim()}
 
 
+# ---------- değişimi fark eden ev hafızası + çıkış kontrolü ----------
+def arac_bolge_gozlemi(bolge, nesneler=None, durumlar=None):
+    cumle = ev_hafiza.gozlem(bolge, nesneler or [], durumlar or [])
+    yayinla("ev", {"bolge": bolge, "nesneler": nesneler or [], "durumlar": durumlar or []})
+    if cumle and mod() == MOD_EV:
+        gecmis_kaydi.ekle("ev/değişiklik", cumle, simdiki_konum())
+        yayinla("olay", f"🏠 {cumle}")
+        print(f"🏠 {cumle}")
+        if ayarlar.get("konusma_duzeyi") != DUZEY_SESSIZ:
+            soyle(cumle)
+    return {"sonuc": "tamam"}
+
+
+def arac_ev_degisiklikleri(bolge=None):
+    return {"bolgeler": ev_hafiza.degisiklikler(bolge)}
+
+
+def arac_cikis_kontrolu():
+    return {"cihazlar": ev_hafiza.durum_ozeti() or "henüz hiçbir cihazın durumunu görmedim",
+            "esyalar": {ad: f"en son {k['once']} {k['konum']}" for ad, k in esya_hafizasi.liste().items()}
+            or "henüz hiçbir eşyayı görmedim",
+            "not": "Eşyanın şu an kullanıcının üzerinde olup olmadığını bilemezsin; son görülen yeri söyle."}
+
+
+# ---------- "olunca haber ver" nöbetçisi ----------
+def arac_nobet_kur(kosul, sure_dk=30):
+    if canli_gozcu is None:
+        return {"hata": "gözcü çalışmıyor"}
+    sure_dk = max(1.0, min(120.0, float(sure_dk or 30)))
+    canli_gozcu.nobet_kur(kosul, sure_dk * 60)
+    yayinla("olay", f"⏳ Nöbet: {kosul} ({sure_dk:.0f} dk)")
+    print(f"⏳ Nöbet kuruldu: {kosul} ({sure_dk:.0f} dk)")
+    return {"sonuc": f"Gözcü {sure_dk:.0f} dakika boyunca bekleyecek: {kosul}. Gözlük karşıya bakmalı."}
+
+
+def arac_nobet_iptal():
+    eski = canli_gozcu.nobet_iptal() if canli_gozcu is not None else None
+    return {"sonuc": "Bekleme iptal edildi." if eski else "Zaten bekleyen bir görev yoktu."}
+
+
+def arac_nobet_tetiklendi(metin):
+    eski = canli_gozcu.nobet_iptal() if canli_gozcu is not None else None
+    if not eski:
+        return {"sonuc": "nöbet yok"}
+    print(f"⏰ Nöbet tetiklendi: {metin}")
+    yayinla("olay", f"⏰ {metin}")
+    gecmis_kaydi.ekle("nöbet", metin, simdiki_konum())
+    ses_yoneticisi.normal_cal(guvenlik.ses_yolu("ton_hazir"))  # dikkat çeken kısa ton
+    if canli is not None:
+        canli.soyle(metin)
+    return {"sonuc": "tamam"}
+
+
+# ---------- yer notları ve geçmiş ----------
+def arac_yer_notu_ekle(metin):
+    konum = simdiki_konum()
+    return {"sonuc": yer_notlari.ekle(metin, konum, navigator.dogruluk if konum else None)}
+
+
+def arac_yer_notu_sil(hangisi="buradaki"):
+    if hangisi == "hepsi":
+        return {"sonuc": yer_notlari.sil(hepsi=True)}
+    if hangisi == "buradaki":
+        konum = simdiki_konum()
+        if konum is None:
+            return {"sonuc": "Telefon konumu gelmiyor, buradaki not bulunamadı."}
+        return {"sonuc": yer_notlari.sil(konum=konum)}
+    return {"sonuc": yer_notlari.sil()}
+
+
+def arac_gecmis_sorgula(dakika=30):
+    return {"kayitlar": gecmis_kaydi.sorgula(float(dakika or 30), simdiki_konum()),
+            "telefon_gps": "var" if simdiki_konum() else "yok (uzaklık bilinmiyor)"}
+
+
+# ---------- tanıdık yüzler ----------
+def arac_yuz_tanit(isim):
+    if yuz_tanima is None:
+        return {"sonuc": "Yüz tanıma kapalı."}
+    return {"sonuc": yuz_tanima.tanit(isim, cam.get)}
+
+
+def arac_yuz_unut(isim):
+    return {"sonuc": yuz_tanima.unut(isim) if yuz_tanima else "Yüz tanıma kapalı."}
+
+
+def arac_kim_var():
+    if yuz_tanima is None:
+        return {"sonuc": "Yüz tanıma kapalı."}
+    return {"sonuc": yuz_tanima.kim_var(), "tanitilanlar": yuz_tanima.liste() or "henüz kimse tanıtılmadı"}
+
+
+def tanidik_goruldu(isim, saat):
+    cumle = f"Saat {saat} yönünde {isim} var."
+    gecmis_kaydi.ekle("kişi", cumle, simdiki_konum())
+    yayinla("olay", f"🙂 {cumle}")
+    if ayarlar.get("konusma_duzeyi") != DUZEY_SESSIZ:
+        soyle(cumle)
+
+
+def yakinda_insan():
+    """Gözcü sık baksın mı: karede büyükçe (yaklaşık 2,5 m'den yakın) bir insan var."""
+    if nesne_tanima is None or time.time() - nesne_tanima.son_zaman > 3:
+        return False
+    h = nesne_tanima.boyut[1] or 1
+    return any(t[1] == "person" and (t[3][3] - t[3][1]) > 0.45 * h for t in nesne_tanima.son)
+
+
+def konum_geldi(lat, lon, dogruluk=None):
+    """Telefondan konum: navigasyon, adım boyu öğrenme ve yer notları."""
+    navigator.konum_guncelle(lat, lon, dogruluk)
+    yurume_kal.konum_geldi((lat, lon), dogruluk)
+    cumle = yer_notlari.kontrol((lat, lon), dogruluk)
+    if cumle:
+        print(f"📍 {cumle}")
+        yayinla("olay", f"📍 {cumle}")
+        gecmis_kaydi.ekle("yer notu", cumle, (lat, lon))
+        threading.Thread(target=soyle, args=(cumle,), daemon=True).start()
+
+
+def nobet_bekcisi():
+    """Süresi dolan nöbeti kullanıcıya bildirir."""
+    while True:
+        time.sleep(5)
+        try:
+            n = canli_gozcu.nobet if canli_gozcu is not None else None
+            if n and n.get("suresi_doldu"):
+                cumle = f"Bekleme süresi doldu: {n['kosul']} görmedim."
+                print(f"⏳ {cumle}")
+                yayinla("olay", f"⏳ {cumle}")
+                soyle(cumle)
+        except Exception as e:
+            print(f"⚠️  Nöbet bekçisi: {type(e).__name__}: {e}")
+
+
 def kare_jpeg():
     """Live'a giden kare: 960 × 720, küçük eşyalar seçilebilsin."""
     if cam is None:
@@ -1004,13 +1169,19 @@ def canli_kur():
                    "durum_bildir": arac_durum_bildir, "esya_kaydet": arac_esya_kaydet,
                    "esya_nerede": arac_esya_nerede, "bildir": arac_bildir,
                    "cevreyi_tara": arac_cevreyi_tara, "navigasyon_baslat": arac_navigasyon_baslat,
-                   "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim}
+                   "navigasyon_durdur": arac_navigasyon_durdur, "neredeyim": arac_neredeyim,
+                   "bolge_gozlemi": arac_bolge_gozlemi, "ev_degisiklikleri": arac_ev_degisiklikleri,
+                   "cikis_kontrolu": arac_cikis_kontrolu, "nobet_kur": arac_nobet_kur,
+                   "nobet_iptal": arac_nobet_iptal, "nobet_tetiklendi": arac_nobet_tetiklendi,
+                   "yer_notu_ekle": arac_yer_notu_ekle, "yer_notu_sil": arac_yer_notu_sil,
+                   "gecmis_sorgula": arac_gecmis_sorgula, "yuz_tanit": arac_yuz_tanit,
+                   "yuz_unut": arac_yuz_unut, "kim_var": arac_kim_var}
         ortak = dict(api_key=API_KEY, ses=ses_yoneticisi, araclar=araclar, kare_al=kare_jpeg,
                      duzey_al=lambda: ayarlar.get("konusma_duzeyi", DUZEY_KISA), mod_al=mod,
                      son_ses_ayarla=son_ses_ayarla, mesafe_bilgisi=mesafe_bilgisi_metni)
         canli = canli_modulu.CanliAsistan(**ortak, yayinla=yayinla, olcum=olcum, gozcu=False, ad="kullanıcı").baslat()
         canli_gozcu = canli_modulu.CanliAsistan(
-            **ortak, gozcu=True, ad="gözcü",
+            **ortak, gozcu=True, ad="gözcü", hizli_al=yakinda_insan,
             mesgul_al=lambda: canli.dinliyor or canli._tur is not None or bool(canli._bekleyen_turlar)).baslat()
         print(f"🤖 Yapay zekâ: Gemini Live ({canli_modulu.CANLI_MODEL}, kullanıcı + gözcü oturumu), "
               f"bağlı değilken REST")
@@ -1216,20 +1387,30 @@ def keyboard_loop():
 
 # ───────────────── MAIN ─────────────────
 def main():
-    global cam, juri_paneli, navigator, nesne_tanima, kamera_mesafe, kulaklik_bekcisi
+    global cam, juri_paneli, navigator, nesne_tanima, kamera_mesafe, kulaklik_bekcisi, yuz_tanima
     print("SYSTEM STARTING...")
     cam = Camera().start()
     navigator = navigasyon.Navigasyon(
         duyur=navigasyon_duyur, google_anahtari=GOOGLE_MAPS_API_KEY or None,
         degisti=lambda d: yayinla("nav", d), yedek_konum=TEST_KONUMU)
     juri_paneli = panel.Panel(kare_al=panel_karesi, durum_al=durum_ozeti,
-                              konum_geldi=navigator.konum_guncelle,
+                              konum_geldi=konum_geldi, adim_geldi=yurume_kal.adim_geldi,
                               harita_al=lambda: kamera_mesafe.harita_jpeg() if kamera_mesafe else None,
                               dugme_olayi=telefon_dugmesi).baslat()
     if goru.YOLO_ACIK:
         # Ayrı thread başlatılmaz: görü hattı (mesafe.py) her karede önce YOLO'yu, sonra derinliği çalıştırır
         nesne_tanima = goru.NesneTanima(kare_al=cam.get, esya_gordu=yolo_esya_gordu)
-    kamera_mesafe = mesafe.KameraMesafe(kare_al=cam.get, mod_al=mod, yolo=nesne_tanima, uyari=engel_uyarisi)
+    ek_isler = []
+    if nesne_tanima is not None:
+        yuz_tanima = yuz.YuzTanima(
+            tanidi=tanidik_goruldu,
+            insanlar_al=lambda: [t for t in nesne_tanima.son if t[1] == "person"])
+        if yuz_tanima.yukle():
+            ek_isler.append(yuz_tanima.isle)
+        else:
+            yuz_tanima = None
+    kamera_mesafe = mesafe.KameraMesafe(kare_al=cam.get, mod_al=mod, yolo=nesne_tanima, uyari=engel_uyarisi,
+                                        ek_isler=ek_isler, yurume=yurume_kal)
     kamera_mesafe.start()
     kulaklik_bekcisi = kulaklik.KulaklikBekcisi(degisti=kulaklik_degisti)
     kulaklik_bekcisi.start()
@@ -1240,6 +1421,7 @@ def main():
         threading.Thread(target=keyboard_loop, daemon=True).start()
     threading.Thread(target=panel_besleyici, daemon=True, name="panel-besleyici").start()
     threading.Thread(target=sokak_anlatimi, daemon=True, name="sokak-anlatimi").start()
+    threading.Thread(target=nobet_bekcisi, daemon=True, name="nobet").start()
 
     time.sleep(2)
     print("\n" + "=" * 60)

@@ -148,12 +148,17 @@ class KameraMesafe(threading.Thread):
     uyari: f(seviye, metin) → yaklaşma uyarısı (seviye "dikkat" | "dur")
     """
 
-    def __init__(self, kare_al, mod_al, yolo=None, uyari=None, aralik=DERINLIK_ARALIK_S):
+    def __init__(self, kare_al, mod_al, yolo=None, uyari=None, aralik=DERINLIK_ARALIK_S,
+                 ek_isler=(), yurume=None):
         """yolo: goru.NesneTanima. Bu thread onu her karede derinlikten hemen önce çalıştırır:
-        ikisi aynı anda çalışınca 4 çekirdeği paylaşıp birbirini 3-4 kat yavaşlatıyordu."""
+        ikisi aynı anda çalışınca 4 çekirdeği paylaşıp birbirini 3-4 kat yavaşlatıyordu.
+        ek_isler: YOLO'dan sonra aynı karede çalışacak f(kare) işleri (yüz tanıma).
+        yurume: yurume.YurumeKalibrasyonu (yürürken mesafe çarpanı)."""
         super().__init__(daemon=True, name="gorus")
         self.kare_al, self.mod_al = kare_al, mod_al
         self.yolo = yolo
+        self.ek_isler = list(ek_isler)
+        self.yurume = yurume
         self.tespitler_al = (lambda: yolo.son) if yolo is not None else (lambda: [])
         self.uyari = uyari
         self.aralik = aralik
@@ -213,6 +218,11 @@ class KameraMesafe(threading.Thread):
                 if kare is not None:
                     if self.yolo is not None:
                         self.yolo.isle(kare)
+                    for is_ in self.ek_isler:
+                        try:
+                            is_(kare)
+                        except Exception as e:
+                            print(f"⚠️  Görü ek işi: {type(e).__name__}: {e}")
                     self._isle(kare)
             except Exception as e:
                 print(f"⚠️  Derinlik hatası: {type(e).__name__}: {e}")
@@ -295,7 +305,8 @@ class KameraMesafe(threading.Thread):
         model, (kx0, ky0, kx1, ky1) = self.ham_derinlik(kare)
         if self.egri is not None:
             ham = self.egri_uygula(model)        # ölçümle çıkarılmış düzeltme eğrisi
-            self.olcek = 1.0                     # eğri varken boy kalibrasyonu karışmasın
+            # eğri varken boy kalibrasyonu karışmasın; sadece yürürken öğrenilen çarpan uygulanır
+            self.olcek = self.yurume.carpan if self.yurume is not None else 1.0
         else:
             ham = model * DERINLIK_CARPAN        # sabit lens düzeltmesi
         derinlik = ham * self.olcek              # + boy kalibrasyonunun ince ayarı
@@ -352,8 +363,13 @@ class KameraMesafe(threading.Thread):
             nesneler.append({"ad": ad, "sinif": sinif, "saat": saat_yonu((x1 + x2) / 2 / w, yatay_fov),
                              "mesafe": round(mesafe, 2), "kaynak": kaynak, "guven": round(guven, 2),
                              "kutu": [int(x1), int(y1), int(x2), int(y2)],
-                             "ham": None if d_ham is None else round(d_ham, 3)})
+                             "ham": None if d_ham is None else round(d_ham, 3),
+                             # kalibrasyonlu derinlik (çarpansız, geometri karışmamış): yürüyüş kalibrasyonu için
+                             "kal": None if d_ham is None else round(float(self.egri_uygula(d_ham)) if
+                                                                     self.egri is not None else d_ham * DERINLIK_CARPAN, 3)})
         self._olcek_guncelle(oranlar)
+        if self.yurume is not None:
+            self.yurume.olcum_geldi(nesneler, w)
         nesneler.sort(key=lambda n: n["mesafe"])
 
         # Yürüme yolu: görüntünün alt-orta bandı (gözlük kamerası yerdeki ve göğüs hizasındaki engeli burada görür)

@@ -11,6 +11,8 @@ burada karar verilir:
          → hemen söylenir; aynı olay 45 sn içinde tekrar edilmez
   engel: yoldaki ya da yakındaki engeller (park etmiş bisiklet, direk, insan grubu)
          → yerlerle aynı sıklık kuralı; aynı engel 2 dk içinde tekrar edilmez
+  sosyal: biri el uzatıyor, el sallıyor, konuşulan kişi gitti → hemen söylenir;
+         aynı ipucu 20 sn içinde tekrar edilmez
   yer  : yön bulmaya yarayan yerler (eczane, market, durak, tabela)
          → en fazla ARALIK saniyede bir; aynı yer 10 dk içinde tekrar edilmez
 
@@ -25,6 +27,7 @@ import time
 SIKLIKLAR = {"az": 60.0, "orta": 30.0, "cok": 10.0}
 OLAY_TEKRAR_S = 45.0
 ENGEL_TEKRAR_S = 120.0
+SOSYAL_TEKRAR_S = 20.0
 YER_TEKRAR_S = 600.0
 BENZERLIK = 0.6
 
@@ -55,7 +58,7 @@ class Anlatici:
         return self.siklik
 
     def _tekrar_mi(self, tur, normal, simdi):
-        sure = {"olay": OLAY_TEKRAR_S, "engel": ENGEL_TEKRAR_S}.get(tur, YER_TEKRAR_S)
+        sure = {"olay": OLAY_TEKRAR_S, "engel": ENGEL_TEKRAR_S, "sosyal": SOSYAL_TEKRAR_S}.get(tur, YER_TEKRAR_S)
         for zaman, t, eski in self._gecmis:
             if simdi - zaman < sure and difflib.SequenceMatcher(None, eski, normal).ratio() >= BENZERLIK:
                 return True
@@ -66,16 +69,17 @@ class Anlatici:
         metin = (metin or "").strip()
         if not metin:
             return False
-        tur = tur if tur in ("olay", "engel") else "yer"
+        tur = tur if tur in ("olay", "engel", "sosyal") else "yer"
         simdi = self.saat()
         self._gecmis = [g for g in self._gecmis if simdi - g[0] < YER_TEKRAR_S]
         normal = _normal(metin)
         if self._tekrar_mi(tur, normal, simdi):
             return False
-        # Engel ve yer bildirimleri aynı sıklık sınırını paylaşır; olaylar hiç beklemez
-        if tur != "olay" and simdi - self._son_yer_zamani < self.aralik:
+        # Engel ve yer bildirimleri aynı sıklık sınırını paylaşır; olay ve sosyal ipuçları hiç beklemez
+        hemen = tur in ("olay", "sosyal")
+        if not hemen and simdi - self._son_yer_zamani < self.aralik:
             return False
-        if tur != "olay":
+        if not hemen:
             self._son_yer_zamani = simdi
         self._gecmis.append((simdi, tur, normal))
         return True

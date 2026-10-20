@@ -75,12 +75,14 @@ class Panel:
     kare_al: f() → JPEG bayt (kutular çizilmiş) ya da None
     durum_al: f() → dict (ilk açılışta tüm durumu göndermek için)
     konum_geldi: f(lat, lon, dogruluk) → navigasyona
+    adim_geldi: f(toplam_adim) → yürürken mesafe kalibrasyonu (telefonun adım sayarı)
     """
 
     DUGME_OLAYLARI = {"kisa", "uzun_basladi", "uzun_bitti", "cift", "ev", "sokak", "sustur"}
 
-    def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None, dugme_olayi=None):
+    def __init__(self, kare_al, durum_al, konum_geldi, harita_al=None, dugme_olayi=None, adim_geldi=None):
         self.kare_al, self.durum_al, self.konum_geldi = kare_al, durum_al, konum_geldi
+        self.adim_geldi = adim_geldi
         self.dugme_olayi = dugme_olayi  # telefondaki kumanda düğmeleri → f(olay)
         self._onbellek = {}             # {ad: (zaman, jpeg)}: kare her istemci için ayrı kodlanmasın
         self._onbellek_kilit = threading.Lock()
@@ -198,6 +200,17 @@ class Panel:
             except (KeyError, TypeError, ValueError):
                 return jsonify({"hata": "lat ve lon gerekli"}), 400
             self.konum_geldi(lat, lon, dogruluk)
+            return jsonify({"tamam": True})
+
+        @app.route("/api/adim", methods=["POST"])
+        def adim():
+            v = request.get_json(force=True, silent=True) or {}
+            try:
+                toplam = float(v["adim"])
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"hata": "adim gerekli"}), 400
+            if self.adim_geldi is not None:
+                self.adim_geldi(toplam)
             return jsonify({"tamam": True})
 
         return app
@@ -365,7 +378,7 @@ button:active{filter:brightness(1.25)}
 </div>
 <div class="bilgi" id="durum">&nbsp;</div>
 <div id="soylenen">Gözlüğün söyledikleri burada görünecek.</div>
-<button id="konum" style="margin-top:14px">Konum paylaşımını aç (navigasyon için)</button>
+<button id="konum" style="margin-top:14px">Konum ve adım paylaşımını aç</button>
 <div class="bilgi" id="gps"></div>
 <script>
 const $=id=>document.getElementById(id);
@@ -401,15 +414,27 @@ async function ekranAcik(){try{kilit=await navigator.wakeLock.request("screen")}
 function konumGonder(c){const simdi=Date.now();if(gonderiliyor||simdi-sonGonderim<1000)return;
  gonderiliyor=true;sonGonderim=simdi;
  istek("/api/konum",{lat:c.latitude,lon:c.longitude,dogruluk:c.accuracy}).then(()=>{sayac++})
-  .catch(()=>{}).finally(()=>{gonderiliyor=false;$("gps").textContent=`Konum gidiyor · ±${Math.round(c.accuracy)} m · ${sayac}`})}
+  .catch(()=>{}).finally(()=>{gonderiliyor=false;$("gps").textContent=`Konum gidiyor · ±${Math.round(c.accuracy)} m · ${sayac}`+(dinleyiciVar?` · ${adim} adım`:"")})}
 $("konum").onclick=()=>{
  if(izleyici!==null){navigator.geolocation.clearWatch(izleyici);izleyici=null;
   if(kilit){kilit.release().catch(()=>{});kilit=null}
-  $("konum").classList.remove("acik");$("konum").textContent="Konum paylaşımını aç (navigasyon için)";$("gps").textContent="Konum kapalı";return}
+  $("konum").classList.remove("acik");$("konum").textContent="Konum ve adım paylaşımını aç";$("gps").textContent="Konum kapalı";
+  adimAcik=false;return}
  if(!navigator.geolocation){$("gps").textContent="Bu tarayıcı konum vermiyor";return}
- ekranAcik();$("gps").textContent="Konum izni bekleniyor…";
+ adimBaslat();ekranAcik();$("gps").textContent="Konum izni bekleniyor…";
  izleyici=navigator.geolocation.watchPosition(p=>konumGonder(p.coords),
   e=>{$("gps").textContent="Konum alınamadı: "+e.message},{enableHighAccuracy:true,maximumAge:1000,timeout:15000});
  $("konum").classList.add("acik");$("konum").textContent="Konum paylaşılıyor · kapatmak için dokun"};
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&izleyici!==null)ekranAcik()});
+// Adım sayar (yürürken mesafe kalibrasyonu): ivme büyüklüğünün tepeleri sayılır, 2 sn'de bir gönderilir.
+// iOS hareket sensörü iznini ancak düğmeye basınca sorabildiği için konum düğmesine bağlı.
+let adim=0,adimAcik=false,ort=9.8,yuksek=false,sonAdim=0,dinleyiciVar=false;
+function hareket(e){const a=e.accelerationIncludingGravity;if(!a||a.x===null)return;
+ const m=Math.hypot(a.x,a.y,a.z);ort=0.97*ort+0.03*m;const f=m-ort,t=Date.now();
+ if(!yuksek&&f>1.3&&t-sonAdim>300){yuksek=true;sonAdim=t;adim++}else if(yuksek&&f<0.3){yuksek=false}}
+async function adimBaslat(){adimAcik=true;
+ try{if(typeof DeviceMotionEvent!=="undefined"&&DeviceMotionEvent.requestPermission){
+  if(await DeviceMotionEvent.requestPermission()!=="granted")return}}catch(_){return}
+ if(!dinleyiciVar){window.addEventListener("devicemotion",hareket);dinleyiciVar=true}}
+setInterval(()=>{if(adimAcik&&dinleyiciVar)istek("/api/adim",{adim}).catch(()=>{})},2000);
 </script></body></html>"""
