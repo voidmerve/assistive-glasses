@@ -167,6 +167,7 @@ class KameraMesafe(threading.Thread):
         self.son_engel = None
         self.karanlik = False      # son kare karanlık mıydı
         self.egri = self._egri_yukle()  # (tahmin dizisi, gerçek dizisi) ya da None
+        self.insan_kutu_carpan = self._kalibrasyon_degeri("insan_kutu_carpan", 1.0)  # kutudan ölçüm düzeltmesi
         self.durdur_olayi = threading.Event()
         self._kilit = threading.Lock()
 
@@ -217,6 +218,16 @@ class KameraMesafe(threading.Thread):
                 print(f"⚠️  Derinlik hatası: {type(e).__name__}: {e}")
                 self.durdur_olayi.wait(5)
             self.durdur_olayi.wait(max(0.1, self.aralik - (time.time() - t0)))
+
+    @staticmethod
+    def _kalibrasyon_degeri(ad, varsayilan):
+        try:
+            import json
+            with open(KALIBRASYON_DOSYASI) as f:
+                k = json.load(f)
+            return float(k[ad]) if 0.5 < float(k.get(ad, 0)) < 2.0 else varsayilan
+        except Exception:
+            return varsayilan
 
     @staticmethod
     def _egri_yukle():
@@ -328,6 +339,8 @@ class KameraMesafe(threading.Thread):
                     oranlar.append(geo / max(d_ham, 0.1))  # kalibrasyona sadece boy ölçümü girer
             elif sinif in BILINEN_GENISLIK and yatay_tam and (x2 - x1) > 20:
                 geo, geo_kaynak = odak * BILINEN_GENISLIK[sinif] / (x2 - x1), "genişlik"
+            if geo is not None and sinif == "person":
+                geo *= self.insan_kutu_carpan  # ölçümle bulunan düzeltme (kollar kutuyu genişletiyor vb.)
             if geo is not None and 0.2 < geo < 30:
                 cok_yakin = (x2 - x1) * (y2 - y1) > 0.33 * w * h  # nesne karenin üçte birinden büyük
                 if cok_yakin or mesafe is None:

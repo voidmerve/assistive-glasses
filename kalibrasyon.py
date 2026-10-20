@@ -228,9 +228,14 @@ def main():
           f"kalibrasyonlu %{np.mean(kal_hatalar):.0f}")
     print(f"  Her mesafenin görüntüsü: {KARE_KLASORU}/")
 
+    kutu_oranlari = [g / geo for g, _, _, geo in olcumler if geo and g >= 1.0]
+    kayit = {"tarih": time.strftime("%Y-%m-%d %H:%M"), "kirpma": mesafe.DERINLIK_KIRPMA,
+             "model": mesafe.MODELLER[model_modu], "noktalar": [list(n) for n in egri]}
+    if len(kutu_oranlari) >= 3:
+        kayit["insan_kutu_carpan"] = round(float(np.median(kutu_oranlari)), 3)
+        print(f"  Kutu boyutundan ölçüm düzeltmesi: × {kayit['insan_kutu_carpan']}")
     with open(mesafe.KALIBRASYON_DOSYASI, "w") as f:
-        json.dump({"tarih": time.strftime("%Y-%m-%d %H:%M"), "kirpma": mesafe.DERINLIK_KIRPMA,
-                   "model": mesafe.MODELLER[model_modu], "noktalar": [list(n) for n in egri]}, f, indent=1)
+        json.dump(kayit, f, indent=1)
     yeni = not os.path.exists(CSV_DOSYASI)
     with open(CSV_DOSYASI, "a", newline="") as f:
         w = csv.writer(f)
